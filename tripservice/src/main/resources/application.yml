@@ -34,3 +34,13 @@ logging:
   level:
     org.hibernate.SQL: debug
     org.springframework: info
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}

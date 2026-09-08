@@ -3,9 +3,7 @@ spring:
     name: user-service
 
   datasource:
-    url: ${SPRING_DATASOURCE_URL}
-    username: ${SPRING_DATASOURCE_USERNAME}
-    password: ${SPRING_DATASOURCE_PASSWORD}
+    url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -18,36 +16,18 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 server:
-  port: 8085
+  port: ${PORT:8086}
 
-# Configuration Keycloak
-#keycloak:
-#  auth-server-url: ${KEYCLOAK_AUTH_SERVER_URL}
-#  realm: ${KEYCLOAK_REALM}
-#  admin:
-#    username: ${KEYCLOAK_ADMIN_USERNAME}
-#    password: ${KEYCLOAK_ADMIN_PASSWORD}
-#    client-id: admin-cli
-
-keycloak:
-  server-url: http://localhost:8000
-  realm: bagbuddy
-  admin-username: admin
-  admin-password: password
-  client-id: admin-cli
-
-# Eureka Client
-eureka:
-  client:
-    service-url:
-      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE}
-    register-with-eureka: true
-    fetch-registry: true
-  instance:
-    prefer-ip-address: true
-    instance-id: ${spring.application.name}:${random.value}
+# --- Authentification (Keycloak) ---
+# Ce service ne parle plus a l'API d'administration de Keycloak : il ne detient aucun
+# secret, il se contente de valider le jeton de l'appelant et de porter le profil applicatif.
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
 
 logging:
   level:
     com.bagbuddy.userservice: INFO
-    org.keycloak: WARN

@@ -16,7 +16,7 @@
     <artifactId>apigateway</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>api-gateway</name>
-    <description>Reactive API Gateway for WoofWoof microservices</description>
+    <description>Reactive API Gateway for BagBuddy microservices</description>
 
     <properties>
         <java.version>17</java.version>

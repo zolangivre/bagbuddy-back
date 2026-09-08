@@ -1,13 +1,18 @@
 package com.bagbuddy.userservice.controller;
 
-import com.bagbuddy.userservice.dto.UserDTO;
+import com.bagbuddy.userservice.dto.PublicUserProfile;
+import com.bagbuddy.userservice.dto.UpdateProfileRequest;
+import com.bagbuddy.userservice.dto.UserProfile;
 import com.bagbuddy.userservice.service.UserService;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
+import jakarta.validation.Valid;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
-
+/**
+ * Profiles only. There is deliberately no endpoint to list every user, create an account or
+ * set a password: account lifecycle belongs to Keycloak.
+ */
 @RestController
 @RequestMapping("/users")
 public class UserController {
@@ -18,60 +23,23 @@ public class UserController {
         this.userService = userService;
     }
 
-    @GetMapping
-    public ResponseEntity<List<UserDTO>> getAllUsers() {
-        return ResponseEntity.ok(userService.getAllUsers());
+    @GetMapping("/me")
+    public UserProfile me(@AuthenticationPrincipal Jwt jwt) {
+        return UserProfile.of(userService.currentProfile(jwt));
     }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<UserDTO> getUserById(@PathVariable String id) {
-        try {
-            UserDTO user = userService.getUserById(id);
-            return ResponseEntity.ok(user);
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
-        }
+    @PutMapping("/me")
+    public UserProfile updateMe(@AuthenticationPrincipal Jwt jwt,
+                                @Valid @RequestBody UpdateProfileRequest request) {
+        return UserProfile.of(userService.updateCurrentProfile(jwt, request));
     }
 
-    @PostMapping
-    public ResponseEntity<UserDTO> createUser(@RequestBody UserDTO userDTO) {
-        try {
-            UserDTO createdUser = userService.createUser(userDTO);
-            return ResponseEntity.status(HttpStatus.CREATED).body(createdUser);
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+    /** Public-facing profile of another member: no email, no phone, no payout account. */
+    @GetMapping("/{sub}")
+    public PublicUserProfile publicProfile(@PathVariable String sub, @AuthenticationPrincipal Jwt jwt) {
+        if (sub.equals(jwt.getSubject())) {
+            return PublicUserProfile.of(userService.currentProfile(jwt));
         }
-    }
-
-    @PutMapping("/{id}")
-    public ResponseEntity<UserDTO> updateUser(
-            @PathVariable String id,
-            @RequestBody UserDTO userDTO) {
-        try {
-            UserDTO updatedUser = userService.updateUser(id, userDTO);
-            return ResponseEntity.ok(updatedUser);
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
-        }
-    }
-
-    @DeleteMapping("/{id}")
-    public ResponseEntity<Void> deleteUser(@PathVariable String id) {
-        try {
-            userService.deleteUser(id);
-            return ResponseEntity.noContent().build();
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
-        }
-    }
-
-    @PostMapping("/{id}/sync")
-    public ResponseEntity<Void> syncUser(@PathVariable String id) {
-        try {
-            userService.syncUserFromKeycloak(id);
-            return ResponseEntity.ok().build();
-        } catch (Exception e) {
-            return ResponseEntity.notFound().build();
-        }
+        return PublicUserProfile.of(userService.publicProfile(sub));
     }
 }

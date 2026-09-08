@@ -5,6 +5,8 @@ import com.stripe.model.PaymentIntent;
 import lombok.Data;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -27,17 +29,30 @@ public class StripeController {
         return ResponseEntity.ok(Map.of("publishableKey", publishableKey));
     }
 
+    /**
+     * Takes the transaction being paid, not an amount: the charge is priced server-side.
+     */
     @PostMapping("/create-payment-intent")
-    public ResponseEntity<CreatePaymentIntentResponse> createPaymentIntent(@RequestBody CreatePaymentIntentRequest req) throws Exception {
-        PaymentIntent pi = stripeService.createPaymentIntent(req.getAmount(), req.getCurrency(), req.getMetadata());
+    public ResponseEntity<CreatePaymentIntentResponse> createPaymentIntent(
+            @RequestBody CreatePaymentIntentRequest req,
+            @AuthenticationPrincipal Jwt jwt) throws Exception {
+        PaymentIntent pi = stripeService.createPaymentIntent(req.getTransactionId(), jwt);
         return ResponseEntity.ok(new CreatePaymentIntentResponse(pi.getClientSecret()));
+    }
+
+    /**
+     * Authenticated by the Stripe signature rather than a bearer token (see SecurityConfig).
+     */
+    @PostMapping("/webhook")
+    public ResponseEntity<Void> webhook(@RequestBody String payload,
+                                        @RequestHeader("Stripe-Signature") String signature) {
+        stripeService.handleWebhook(payload, signature);
+        return ResponseEntity.ok().build();
     }
 
     @Data
     public static class CreatePaymentIntentRequest {
-        private Long amount;
-        private String currency = "eur";
-        private Map<String, String> metadata;
+        private Long transactionId;
     }
 
     @Data

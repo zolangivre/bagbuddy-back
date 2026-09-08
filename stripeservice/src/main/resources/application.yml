@@ -27,3 +27,29 @@ logging:
     "[com.netflix.eureka]": ERROR
     "[com.netflix.discovery]": ERROR
     root: INFO
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+# --- Appels service-a-service (webhook Stripe -> transactionservice) ---
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-service:
+      provider: keycloak
+      client-id: ${KEYCLOAK_SERVICE_CLIENT_ID:bagbuddy}
+      client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
+
+bagbuddy.service-client.registration-id: bagbuddy-service
+bagbuddy.transaction-service.url: ${TRANSACTION_SERVICE_URL:http://localhost:8083}
+bagbuddy.stripe.currency: ${STRIPE_CURRENCY:eur}

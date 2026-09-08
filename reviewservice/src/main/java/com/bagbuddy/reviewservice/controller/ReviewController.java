@@ -2,6 +2,8 @@ package com.bagbuddy.reviewservice.controller;
 
 import com.bagbuddy.reviewservice.model.Review;
 import com.bagbuddy.reviewservice.service.ReviewService;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -45,17 +47,17 @@ public class ReviewController {
     }
 
     @PostMapping
-    public Review create(@RequestBody Review review) {
-        return reviewService.create(review);
+    public Review create(@RequestBody Review review, @AuthenticationPrincipal Jwt jwt) {
+        return reviewService.create(review, jwt);
     }
 
     @PutMapping("/{id}")
-    public Review update(@PathVariable Long id, @RequestBody Review body) {
-        return reviewService.update(id, body);
+    public Review update(@PathVariable Long id, @RequestBody Review body, @AuthenticationPrincipal Jwt jwt) {
+        return reviewService.update(id, body, jwt.getSubject());
     }
 
     @DeleteMapping("/{id}")
-    public void delete(@PathVariable Long id) {
-        reviewService.delete(id);
+    public void delete(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt) {
+        reviewService.delete(id, jwt.getSubject());
     }
 }

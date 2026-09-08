@@ -27,6 +27,7 @@ services:
       - TRANSACTION_SERVICE_URL=http://transaction-service:8083
       - REVIEW_SERVICE_URL=http://review-service:8084
       - STRIPE_SERVICE_URL=http://stripe-service:8085
+      - USER_SERVICE_URL=http://user-service:8086
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:4200}
     networks:
       - bagbuddy-network
@@ -44,6 +45,9 @@ services:
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Substitue dans keycloak/import/bagbuddy-realm.json a l'import du realm :
+      # le secret du client de service ne figure plus dans le depot.
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
     ports:
       - "8000:8080"
     volumes:
@@ -69,44 +73,42 @@ services:
       - bagbuddy-network
 
   # --- USER SERVICE ---
-#  user-service:
-#    build:
-#      context: ./userservice
-#      dockerfile: Dockerfile
-#    container_name: user-service-dev
-#    env_file:
-#      - ./.env
-#    ports:
-#      - "8085:8085"
-#    depends_on:
-#      - eureka-server
-#      - keycloak
-#      - userservice-db
-#    environment:
-#      - SPRING_DATASOURCE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}
-#      - SPRING_DATASOURCE_USERNAME=${USER_SERVICE_USER}
-#      - SPRING_DATASOURCE_PASSWORD=${USER_SERVICE_PASSWORD}
-#      - KEYCLOAK_AUTH_SERVER_URL=http://keycloak:8080
-#      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-bagbuddy}
-#      - KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN}
-#      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
-#      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
-#    networks:
-#      - bagbuddy-network
-#
-#  userservice-db:
-#    image: postgres:15-alpine
-#    container_name: user-service-postgres
-#    environment:
-#      POSTGRES_DB: ${USER_SERVICE_DB}
-#      POSTGRES_USER: ${USER_SERVICE_USER}
-#      POSTGRES_PASSWORD: ${USER_SERVICE_PASSWORD}
-#    volumes:
-#      - user_pgdata:/var/lib/postgresql/data
-#    ports:
-#      - ${USER_SERVICE_DB_PORT}:5432
-#    networks:
-#      - bagbuddy-network
+  # Profils applicatifs (bio, localisation, telephone, compte Stripe). L'identite reste
+  # geree par Keycloak : ce service ne detient aucun secret d'administration.
+  user-service:
+    build:
+      context: ./userservice
+      dockerfile: Dockerfile
+    container_name: user-service-dev
+    env_file:
+      - ./.env
+    environment:
+      - PORT=8086
+      - DATABASE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}?user=${USER_SERVICE_USER}&password=${USER_SERVICE_PASSWORD}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+    ports:
+      - "8086:8086"
+    depends_on:
+      - keycloak
+      - userservice-db
+    networks:
+      - bagbuddy-network
+
+  userservice-db:
+    image: postgres:15-alpine
+    container_name: user-service-postgres
+    environment:
+      POSTGRES_DB: ${USER_SERVICE_DB}
+      POSTGRES_USER: ${USER_SERVICE_USER}
+      POSTGRES_PASSWORD: ${USER_SERVICE_PASSWORD}
+    volumes:
+      - user_pgdata:/var/lib/postgresql/data
+    ports:
+      - ${USER_SERVICE_DB_PORT}:5432
+    networks:
+      - bagbuddy-network
 
   # --- TRIP SERVICE ---
   trip-service:
@@ -119,10 +121,14 @@ services:
     environment:
       - PORT=8082
       - DATABASE_URL=jdbc:postgresql://tripservice-db:5432/${TRIP_SERVICE_DB}?user=${TRIP_SERVICE_USER}&password=${TRIP_SERVICE_PASSWORD}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
     ports:
       - "8082:8082"
     depends_on:
       - eureka-server
+      - keycloak
       - tripservice-db
     networks:
       - bagbuddy-network
@@ -152,10 +158,21 @@ services:
     environment:
       - PORT=8083
       - DATABASE_URL=jdbc:postgresql://transactionservice-db:5432/${TRANSACTION_SERVICE_DB}?user=${TRANSACTION_SERVICE_USER}&password=${TRANSACTION_SERVICE_PASSWORD}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
+      - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      - TRIP_SERVICE_URL=http://trip-service:8082
+      # stripe-service est desactive en dev : le paiement est simule, pas confirme par
+      # webhook. A remettre a true (defaut) des que stripe-service tourne.
+      - PAYMENTS_REQUIRE_STRIPE=false
     ports:
       - "8083:8083"
     depends_on:
       - eureka-server
+      - keycloak
       - transactionservice-db
     networks:
       - bagbuddy-network
@@ -185,10 +202,15 @@ services:
     environment:
       - PORT=8084
       - DATABASE_URL=jdbc:postgresql://reviewservice-db:5432/${REVIEW_SERVICE_DB}?user=${REVIEW_SERVICE_USER}&password=${REVIEW_SERVICE_PASSWORD}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
     ports:
       - "8084:8084"
     depends_on:
       - eureka-server
+      - keycloak
       - reviewservice-db
     networks:
       - bagbuddy-network
@@ -207,7 +229,7 @@ services:
     networks:
       - bagbuddy-network
 
-  # Disabled for local dev: requires STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY
+  # Disabled for local dev: requires STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY / STRIPE_WEBHOOK_SECRET
   # stripe-service:
   #   build:
   #     context: ./stripeservice
@@ -218,11 +240,19 @@ services:
   #   ports:
   #     - "8085:8085"
   #   depends_on:
-  #     - eureka-server
+  #     - keycloak
   #   environment:
   #     PORT: 8085
   #     STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
   #     STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
+  #     STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+  #     JWT_ISSUER_URIS: http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+  #     JWT_JWK_SET_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+  #     JWT_AUDIENCE: bagbuddy-api
+  #     KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+  #     KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
+  #     KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+  #     TRANSACTION_SERVICE_URL: http://transaction-service:8083
   #   networks:
   #     - bagbuddy-network
 

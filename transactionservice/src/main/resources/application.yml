@@ -34,3 +34,44 @@ logging:
   level:
     org.hibernate.SQL: debug
     org.springframework: info
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+# --- Appels service-a-service ---
+# transactionservice tarifie une reservation contre l'annonce reelle detenue par
+# tripservice. Le secret vient de l'environnement, jamais du depot.
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-service:
+      provider: keycloak
+      client-id: ${KEYCLOAK_SERVICE_CLIENT_ID:bagbuddy}
+      client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
+
+bagbuddy.service-client.registration-id: bagbuddy-service
+bagbuddy.trip-service.url: ${TRIP_SERVICE_URL:http://localhost:8082}
+
+# --- Machine a etats des transactions ---
+# Le vocabulaire doit rester aligne sur TRANSACTION_STATUS du front (repo bagbuddy-front).
+# Les transitions autorisees, elles, sont dans TransactionStateMachine.
+bagbuddy.transaction.status:
+  reservation-received: reservation_received
+  waiting-for-response-buyer: waiting_for_response
+  waiting-for-response-seller: waiting_for_response_seller
+  request-rejected: request_rejected
+  awaiting-payment: awaiting_payment
+  payment-required: payment_required
+  confirmed: confirmed
+  completed: completed
+  cancelled: cancelled

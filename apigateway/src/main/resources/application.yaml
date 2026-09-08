@@ -25,6 +25,11 @@ spring:
           predicates:
             - Path=/stripe/**
 
+        - id: user-service
+          uri: ${USER_SERVICE_URL}
+          predicates:
+            - Path=/users/**
+
       globalcors:
         cors-configurations:
           "[/**]":

@@ -1,8 +1,8 @@
 # BagBuddy — backend
 
 Backend en microservices Spring Boot (Eureka, API gateway, trip / transaction /
-review / stripe services) + Keycloak pour l'authentification, orchestrés avec
-Docker Compose pour le développement local.
+review / stripe / user services) + Keycloak pour l'authentification, orchestrés
+avec Docker Compose pour le développement local.
 
 C'est le repo backend de BagBuddy. Le front web (Angular) vit dans un repo
 séparé : `bagbuddy-front`. Les deux se lancent indépendamment ; le front tape
@@ -23,6 +23,16 @@ Remplis `.env` avec les mots de passe locaux de ton choix (ils n'existent que
 dans tes conteneurs Postgres/Keycloak locaux, rien n'est envoyé à l'extérieur —
 voir les commentaires de `.env.example` pour le rôle de chaque valeur).
 
+Une valeur mérite une attention particulière : `KEYCLOAK_SERVICE_CLIENT_SECRET`.
+C'est le secret du client confidentiel `bagbuddy`, utilisé pour les appels
+machine-à-machine (tarification d'une réservation, confirmation d'un paiement).
+Il est injecté dans Keycloak à l'import du realm, donc il ne figure nulle part
+dans le dépôt. Génère-le une fois :
+
+```bash
+openssl rand -base64 32
+```
+
 ## Tout lancer
 
 ```bash
@@ -41,6 +51,7 @@ minutes. Une fois debout, tout ceci est prêt sans configuration supplémentaire
 | trip-service            | http://localhost:8082            |
 | transaction-service     | http://localhost:8083            |
 | review-service          | http://localhost:8084            |
+| user-service            | http://localhost:8086            |
 
 Keycloak réimporte le realm `bagbuddy` depuis
 `keycloak/import/bagbuddy-realm.json` à chaque démarrage — les clients
@@ -52,8 +63,40 @@ Keycloak nécessaire :
 - **password :** `Test1234!`
 
 `stripe-service` est défini mais commenté dans `docker-compose.dev.yml` — il lui
-faut de vraies clés de test `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` dans
-`.env` pour servir à quelque chose. Décommente son bloc une fois que tu les as.
+faut de vraies clés de test `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` /
+`STRIPE_WEBHOOK_SECRET` dans `.env` pour servir à quelque chose. Décommente son
+bloc une fois que tu les as.
+
+## Authentification
+
+Tous les services sont des **resource servers OAuth2** : chaque requête doit
+porter un `Authorization: Bearer <access_token>` Keycloak valide, sinon c'est
+401. Le front obtient ce token en PKCE auprès de Keycloak, puis appelle la
+gateway avec.
+
+Au-delà de l'authentification, chaque service applique ses propres règles de
+propriété : on ne modifie que ses propres annonces, on ne lit que les
+transactions dont on est partie, et les coordonnées (email, téléphone) d'un
+autre membre ne sortent jamais des endpoints de navigation.
+
+Deux endpoints ne sont **pas** joignables avec un token utilisateur — ils
+exigent le rôle realm `service`, porté uniquement par le client confidentiel
+`bagbuddy` :
+
+| Endpoint                                    | Appelé par           | Pourquoi |
+| ------------------------------------------- | -------------------- | -------- |
+| `GET /trips/internal/{id}`                     | transaction-service  | tarifer une réservation contre l'annonce réelle |
+| `POST /trips/internal/{id}/reserve`            | transaction-service  | décrémenter le poids restant sous verrou |
+| `POST /transactions/internal/{id}/payment`     | stripe-service       | enregistrer un paiement confirmé par webhook signé |
+
+À noter pour le front : le poids restant d'une annonce n'est plus à décrémenter
+côté client après une réservation — `transaction-service` s'en charge lors de la
+création de la transaction, sous verrou, ce qui évite de survendre la capacité.
+
+Le montant d'un paiement n'est jamais fourni par le client : `stripe-service`
+lit la transaction, qui a elle-même été tarifée côté serveur à partir de
+l'annonce. Et le passage en « payé » n'est accepté que depuis un webhook Stripe
+dont la signature est vérifiée (`STRIPE_WEBHOOK_SECRET`).
 
 ## Front web
 
@@ -76,7 +119,21 @@ Tout arrêter (ajoute `-v` pour effacer aussi les bases et repartir de zéro) :
 docker compose -f docker-compose.dev.yml down -v
 ```
 
+## Tests
+
+Chaque service se teste indépendamment ; les tests tournent sur une base H2 en
+mémoire, sans Docker ni Keycloak :
+
+```bash
+cd tripservice && ./mvnw test
+```
+
+`tripservice`, `transactionservice` et `userservice` embarquent des tests de
+sécurité qui vérifient concrètement les règles ci-dessus (accès anonyme refusé,
+propriété, masquage des coordonnées, montant non falsifiable).
+
 ## Ajouter un microservice
 
 N'oublie pas d'ajouter un Dockerfile et le bloc de service correspondant dans
-`docker-compose.dev.yml` quand tu en crées un.
+`docker-compose.dev.yml` quand tu en crées un — avec ses variables `PORT`,
+`JWT_ISSUER_URIS`, `JWT_JWK_SET_URI` et `JWT_AUDIENCE`.
