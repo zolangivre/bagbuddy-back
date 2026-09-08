@@ -1,0 +1,1 @@
+web: java -Xmx350m -Xss512k -XX:+UseSerialGC -XX:MaxMetaspaceSize=100m -Dserver.port=$PORT -jar target/stripeservice-0.0.1-SNAPSHOT.jar

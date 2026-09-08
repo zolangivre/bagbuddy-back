@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: eureka-server
+
+server:
+  port: ${PORT:8761}
+
+eureka:
+  client:
+    register-with-eureka: false
+    fetch-registry: false
+    service-url:
+      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+  server:
+    wait-time-in-ms-when-sync-empty: 0
+    response-cache-update-interval-ms: 5000
+    enable-self-preservation: false
+    eviction-interval-timer-in-ms: 10000
+  instance:
+    hostname: eurekaserver-app-dd87242b5252.herokuapp.com
+    prefer-ip-address: false
+    non-secure-port: 80
+    non-secure-port-enabled: true
+    secure-port-enabled: false
+
+logging:
+  level:
+    "[com.netflix.eureka]": OFF
+    "[com.netflix.discovery]": OFF

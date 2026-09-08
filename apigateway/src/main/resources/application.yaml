@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+      routes:
+        - id: trip-service
+          uri: ${TRIP_SERVICE_URL}
+          predicates:
+            - Path=/trips/**
+
+        - id: transaction-service
+          uri: ${TRANSACTION_SERVICE_URL}
+          predicates:
+            - Path=/transactions/**
+
+        - id: review-service
+          uri: ${REVIEW_SERVICE_URL}
+          predicates:
+            - Path=/reviews/**
+
+        - id: stripe-service
+          uri: ${STRIPE_SERVICE_URL}
+          predicates:
+            - Path=/stripe/**
+
+      globalcors:
+        cors-configurations:
+          "[/**]":
+            allowedOriginPatterns: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
+            allowedMethods: "*"
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+
+      httpclient:
+        connect-timeout: 5000
+        response-timeout: 20000
+        pool:
+          max-connections: 50
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    "[org.springframework.cloud.gateway]": INFO
+    root: INFO
