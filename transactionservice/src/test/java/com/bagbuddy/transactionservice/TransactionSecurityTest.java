@@ -6,6 +6,7 @@ import com.bagbuddy.transactionservice.model.ListingInfo;
 import com.bagbuddy.transactionservice.model.Transaction;
 import com.bagbuddy.transactionservice.model.UserInfo;
 import com.bagbuddy.transactionservice.repository.TransactionRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,9 +16,12 @@ import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,6 +30,11 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+/**
+ * Securite testee sur la vraie surface HTTP : POST /transactions/graphql traverse toute la
+ * chaine de filtres. Sans jeton on obtient un 401 ; avec un jeton mais sans droit, un 200
+ * portant errors[].extensions.classification.
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class TransactionSecurityTest {
@@ -40,12 +49,36 @@ class TransactionSecurityTest {
     @Autowired
     private TransactionRepository transactionRepository;
 
+    @Autowired
+    private ObjectMapper objectMapper;
+
     @MockitoBean
     private TripClient tripClient;
 
     @BeforeEach
     void reset() {
         transactionRepository.deleteAll();
+    }
+
+    private MockHttpServletRequestBuilder graphql(String query, Map<String, Object> variables)
+            throws Exception {
+        return post("/transactions/graphql")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(
+                        Map.of("query", query, "variables", variables)));
+    }
+
+    private MockHttpServletRequestBuilder graphql(String query) throws Exception {
+        return graphql(query, Map.of());
+    }
+
+    /** mutation updateTransaction, la forme utilisee par presque tous les tests d'etat. */
+    private MockHttpServletRequestBuilder move(Long id, Map<String, Object> input) throws Exception {
+        return graphql("""
+                mutation($id: ID!, $input: UpdateTransactionInput!) {
+                    updateTransaction(id: $id, input: $input) { buyerStatus sellerStatus }
+                }
+                """, Map.of("id", id, "input", input));
     }
 
     private Transaction existingDeal() {
@@ -87,33 +120,44 @@ class TransactionSecurityTest {
 
     @Test
     void anonymousCallersAreRejected() throws Exception {
-        mockMvc.perform(get("/transactions")).andExpect(status().isUnauthorized());
+        mockMvc.perform(graphql("{ myTransactions { id } }")).andExpect(status().isUnauthorized());
     }
 
     @Test
-    void theListingEndpointOnlyReturnsTheCallersOwnDeals() throws Exception {
+    void theListingQueryOnlyReturnsTheCallersOwnDeals() throws Exception {
         existingDeal();
 
-        mockMvc.perform(get("/transactions").with(jwt().jwt(j -> j.subject(STRANGER))))
+        mockMvc.perform(graphql("{ myTransactions { id } }")
+                        .with(jwt().jwt(j -> j.subject(STRANGER))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(0));
+                .andExpect(jsonPath("$.data.myTransactions.length()").value(0));
 
-        mockMvc.perform(get("/transactions").with(jwt().jwt(j -> j.subject(BUYER))))
+        mockMvc.perform(graphql("{ myTransactions { id } }")
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1));
+                .andExpect(jsonPath("$.data.myTransactions.length()").value(1));
     }
 
     @Test
     void aStrangerCannotReadOrDeleteSomebodyElsesDeal() throws Exception {
         Transaction tx = existingDeal();
+        var stranger = jwt().jwt(j -> j.subject(STRANGER));
 
-        mockMvc.perform(get("/transactions/" + tx.getId()).with(jwt().jwt(j -> j.subject(STRANGER))))
-                .andExpect(status().isForbidden());
-        mockMvc.perform(delete("/transactions/" + tx.getId()).with(jwt().jwt(j -> j.subject(STRANGER))))
-                .andExpect(status().isForbidden());
-        mockMvc.perform(get("/transactions/buyer/" + BUYER + "/total-spent")
-                        .with(jwt().jwt(j -> j.subject(STRANGER))))
-                .andExpect(status().isForbidden());
+        mockMvc.perform(graphql("query($id: ID!) { transaction(id: $id) { id } }",
+                        Map.of("id", tx.getId())).with(stranger))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"))
+                .andExpect(jsonPath("$.data.transaction").doesNotExist());
+
+        mockMvc.perform(graphql("mutation($id: ID!) { deleteTransaction(id: $id) }",
+                        Map.of("id", tx.getId())).with(stranger))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
+
+        mockMvc.perform(graphql("query($b: String!) { totalSpent(buyerId: $b) }",
+                        Map.of("b", BUYER)).with(stranger))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
 
         assertThat(transactionRepository.findById(tx.getId())).isPresent();
     }
@@ -123,13 +167,11 @@ class TransactionSecurityTest {
         Transaction tx = existingDeal();
 
         // reservation_received -> awaiting_payment est une transition reservee au vendeur.
-        mockMvc.perform(put("/transactions/" + tx.getId())
-                        .with(jwt().jwt(j -> j.subject(BUYER)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"sellerStatus":"awaiting_payment","buyerStatus":"payment_required"}
-                                """))
-                .andExpect(status().isForbidden());
+        mockMvc.perform(move(tx.getId(), Map.of(
+                        "sellerStatus", "awaiting_payment", "buyerStatus", "payment_required"))
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
 
         Transaction stored = transactionRepository.findById(tx.getId()).orElseThrow();
         assertThat(stored.getSellerStatus()).isEqualTo("reservation_received");
@@ -140,13 +182,11 @@ class TransactionSecurityTest {
         Transaction tx = existingDeal();
 
         // On ne saute pas de "demande recue" directement a "termine".
-        mockMvc.perform(put("/transactions/" + tx.getId())
-                        .with(jwt().jwt(j -> j.subject(BUYER)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"sellerStatus":"completed","buyerStatus":"completed"}
-                                """))
-                .andExpect(status().isBadRequest());
+        mockMvc.perform(move(tx.getId(), Map.of(
+                        "sellerStatus", "completed", "buyerStatus", "completed"))
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
 
         assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getBuyerStatus())
                 .isEqualTo("waiting_for_response");
@@ -157,13 +197,11 @@ class TransactionSecurityTest {
         Transaction tx = existingDeal();
         when(tripClient.reserve(any(), any())).thenReturn(listing());
 
-        mockMvc.perform(put("/transactions/" + tx.getId())
-                        .with(jwt().jwt(j -> j.subject(SELLER)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"sellerStatus":"awaiting_payment","buyerStatus":"payment_required"}
-                                """))
-                .andExpect(status().isOk());
+        mockMvc.perform(move(tx.getId(), Map.of(
+                        "sellerStatus", "awaiting_payment", "buyerStatus", "payment_required"))
+                        .with(jwt().jwt(j -> j.subject(SELLER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.updateTransaction.buyerStatus").value("payment_required"));
 
         org.mockito.Mockito.verify(tripClient).reserve(
                 org.mockito.ArgumentMatchers.eq(1L),
@@ -179,16 +217,12 @@ class TransactionSecurityTest {
         tx.setBuyerStatus("payment_required");
         transactionRepository.save(tx);
 
-        String confirm = """
-                {"sellerStatus":"confirmed","buyerStatus":"confirmed","paidAt":"2020-01-01T00:00:00"}
-                """;
+        Map<String, Object> confirm = Map.of("sellerStatus", "confirmed", "buyerStatus", "confirmed");
 
         // require-stripe est actif par defaut : sans confirmation du webhook, on refuse.
-        mockMvc.perform(put("/transactions/" + tx.getId())
-                        .with(jwt().jwt(j -> j.subject(BUYER)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(confirm))
-                .andExpect(status().isBadRequest());
+        mockMvc.perform(move(tx.getId(), confirm).with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
         assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getPaidAt()).isNull();
 
         // Une fois le paiement enregistre par le webhook signe, la transition passe.
@@ -201,38 +235,60 @@ class TransactionSecurityTest {
                                 """))
                 .andExpect(status().isOk());
 
-        mockMvc.perform(put("/transactions/" + tx.getId())
-                        .with(jwt().jwt(j -> j.subject(BUYER)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(confirm))
+        mockMvc.perform(move(tx.getId(), confirm).with(jwt().jwt(j -> j.subject(BUYER))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.buyerStatus").value("confirmed"));
+                .andExpect(jsonPath("$.data.updateTransaction.buyerStatus").value("confirmed"));
     }
 
     @Test
     void theAmountIsPricedFromTheListingNotFromTheRequest() throws Exception {
         when(tripClient.fetch(any())).thenReturn(listing());
 
-        mockMvc.perform(post("/transactions")
-                        .with(jwt().jwt(j -> j.subject(BUYER).claim("email", "buyer@example.com")))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"listingId":1,"weight":2,"total":0.01,"sellerId":"attacker",
-                                 "buyerId":"someone-else","buyerStatus":"completed","paidAt":"2020-01-01T00:00:00"}
-                                """))
+        mockMvc.perform(graphql("""
+                        mutation($input: CreateTransactionInput!) {
+                            createTransaction(input: $input) {
+                                total buyerId sellerId sellerStatus buyerStatus paidAt
+                            }
+                        }
+                        """, Map.of("input", Map.of("listingId", 1, "weight", 2)))
+                        .with(jwt().jwt(j -> j.subject(BUYER).claim("email", "buyer@example.com"))))
                 .andExpect(status().isOk())
-                // 2 kg x 12.50 EUR, not the 0.01 the client asked for
-                .andExpect(jsonPath("$.total").value(25.00))
-                .andExpect(jsonPath("$.buyerId").value(BUYER))
-                .andExpect(jsonPath("$.sellerId").value(SELLER))
-                .andExpect(jsonPath("$.sellerStatus").value("reservation_received"))
-                .andExpect(jsonPath("$.buyerStatus").value("waiting_for_response"))
-                .andExpect(jsonPath("$.paidAt").doesNotExist());
+                // 2 kg x 12.50 EUR : le montant vient de l'annonce, pas de l'appelant.
+                .andExpect(jsonPath("$.data.createTransaction.total").value(25.00))
+                .andExpect(jsonPath("$.data.createTransaction.buyerId").value(BUYER))
+                .andExpect(jsonPath("$.data.createTransaction.sellerId").value(SELLER))
+                .andExpect(jsonPath("$.data.createTransaction.sellerStatus").value("reservation_received"))
+                .andExpect(jsonPath("$.data.createTransaction.buyerStatus").value("waiting_for_response"))
+                .andExpect(jsonPath("$.data.createTransaction.paidAt").doesNotExist());
 
         // L'annonce est lue pour tarifer, mais la capacite n'est pas encore prise :
         // elle ne sort du stock que lorsque le vendeur accepte.
         org.mockito.Mockito.verify(tripClient).fetch(1L);
         org.mockito.Mockito.verify(tripClient, org.mockito.Mockito.never()).reserve(any(), any());
+    }
+
+    @Test
+    void theSchemaRefusesTheMoneyAndIdentityFieldsOutright() throws Exception {
+        // CreateTransactionInput n'expose ni total, ni sellerId, ni paidAt : ce que l'ancien
+        // controleur REST ignorait silencieusement est desormais rejete par le typage.
+        Map<String, Object> forged = new HashMap<>();
+        forged.put("listingId", 1);
+        forged.put("weight", 2);
+        forged.put("total", 0.01);
+        forged.put("sellerId", "attacker");
+        forged.put("paidAt", "2020-01-01T00:00:00");
+
+        mockMvc.perform(graphql("""
+                        mutation($input: CreateTransactionInput!) {
+                            createTransaction(input: $input) { id }
+                        }
+                        """, Map.of("input", forged))
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("ValidationError"));
+
+        assertThat(transactionRepository.findAll()).isEmpty();
+        org.mockito.Mockito.verify(tripClient, org.mockito.Mockito.never()).fetch(any());
     }
 
     @Test

@@ -1,0 +1,87 @@
+# Profils applicatifs : ce que Keycloak ne porte pas (bio, localisation, telephone, compte de
+# paiement). L'identite elle-meme reste a Keycloak, editee via updateIdentity / changePassword.
+#
+# Attention en lisant SecurityConfig : /users/graphql est le seul point d'entree GraphQL du
+# projet ouvert sans jeton, parce que l'inscription est une operation de ce meme schema.
+# L'authentification est donc portee resolver par resolver (@PreAuthorize), pas par l'URL.
+
+scalar DateTime
+
+type Query {
+    "Profil de l'appelant, cree a la volee a la premiere visite depuis les claims du jeton."
+    me: UserProfile!
+
+    "Profil public d'un autre membre : ni email, ni telephone, ni compte de paiement."
+    user(sub: String!): PublicUserProfile!
+}
+
+type Mutation {
+    """
+    Inscription. Seule operation du schema accessible sans jeton : le compte qu'elle cree est
+    precisement celui dont l'appelant n'a pas encore de jeton. Le compte est cree dans
+    Keycloak ; le profil applicatif, lui, apparait a la premiere requete me.
+    """
+    register(input: RegisterInput!): Boolean!
+
+    "Champs libres du profil. L'identite n'est pas modifiable ici, par construction."
+    updateProfile(input: UpdateProfileInput!): UserProfile!
+
+    "Nom et email, portes par Keycloak. Un changement d'email repasse par une verification."
+    updateIdentity(input: UpdateIdentityInput!): UserProfile!
+
+    "Le mot de passe actuel est exige : une session ouverte ne suffit pas a en changer."
+    changePassword(input: ChangePasswordInput!): Boolean!
+}
+
+"Profil complet. N'est jamais renvoye qu'a son proprietaire."
+type UserProfile {
+    sub: String
+    email: String
+    emailVerified: Boolean!
+    username: String
+    name: String
+    givenName: String
+    familyName: String
+    bio: String
+    location: String
+    phone: String
+    stripeAccountId: String
+}
+
+"Ce que tout membre authentifie peut voir d'un autre."
+type PublicUserProfile {
+    sub: String
+    username: String
+    name: String
+    givenName: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+}
+
+input RegisterInput {
+    firstName: String!
+    lastName: String!
+
+    "Sert aussi de nom d'utilisateur : il n'y a pas de champ username."
+    email: String!
+    password: String!
+}
+
+input UpdateProfileInput {
+    bio: String
+    location: String
+    phone: String
+    stripeAccountId: String
+}
+
+input UpdateIdentityInput {
+    firstName: String!
+    lastName: String!
+    email: String!
+}
+
+input ChangePasswordInput {
+    currentPassword: String!
+    newPassword: String!
+}

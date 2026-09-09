@@ -4,23 +4,26 @@ import com.bagbuddy.tripservice.model.UserInfo;
 import lombok.Data;
 
 /**
- * Seller snapshot as exposed on the wire. Contact details (email, phone) are only filled in
- * for the owner of the trip: the browse endpoints are readable by every authenticated user
- * and must not hand out the whole address book.
+ * Instantane du voyageur tel qu'expose par le schema GraphQL. Les coordonnees (email, phone)
+ * ne sont remplies que pour le proprietaire de l'annonce : les listes sont lisibles par tout
+ * membre authentifie et ne doivent pas distribuer le carnet d'adresses.
+ *
+ * Les noms sont en camelCase, comme le veut la convention GraphQL : l'entite UserInfo garde
+ * ses colonnes snake_case, seule la representation sur le fil change.
  */
 @Data
 public class UserInfoView {
 
     private String sub;
     private String name;
-    private String given_name;
-    private String family_name;
+    private String givenName;
+    private String familyName;
     private String username;
-    private boolean email_verified;
+    private boolean emailVerified;
     private String bio;
     private String location;
 
-    // Only populated when the caller owns the trip.
+    // Uniquement quand l'appelant possede l'annonce.
     private String email;
     private String phone;
 
@@ -31,10 +34,10 @@ public class UserInfoView {
         UserInfoView view = new UserInfoView();
         view.sub = source.getSub();
         view.name = source.getName();
-        view.given_name = source.getGiven_name();
-        view.family_name = source.getFamily_name();
+        view.givenName = source.getGiven_name();
+        view.familyName = source.getFamily_name();
         view.username = source.getUsername();
-        view.email_verified = source.isEmail_verified();
+        view.emailVerified = source.isEmail_verified();
         view.bio = source.getBio();
         view.location = source.getLocation();
         if (includeContactDetails) {

@@ -1,0 +1,53 @@
+# Avis entre membres. Un avis ne peut etre ecrit que par une partie a la transaction, sur
+# l'autre partie : l'auteur et le sujet sont tous deux resolus cote serveur (ReviewService).
+
+scalar DateTime
+
+type Query {
+    reviews: [Review!]!
+    review(id: ID!): Review!
+    reviewsByReviewee(revieweeId: String!): [Review!]!
+    reviewsByReviewer(reviewerId: String!): [Review!]!
+    reviewsByTransaction(transactionId: ID!): [Review!]!
+
+    "Moyenne des notes recues. Null tant que le membre n'a recu aucun avis."
+    averageRating(revieweeId: String!): Float
+}
+
+type Mutation {
+    """
+    Ecrit un avis. La transaction est relue avec le jeton de l'appelant : transactionservice
+    refuse deja de la servir a qui n'y a pas pris part, ce qui est exactement le controle voulu.
+    """
+    createReview(input: CreateReviewInput!): Review!
+
+    "Seul l'auteur modifie, et seulement le contenu -- jamais qui est note."
+    updateReview(id: ID!, input: UpdateReviewInput!): Review!
+
+    deleteReview(id: ID!): Boolean!
+}
+
+type Review {
+    id: ID!
+    reviewerId: String
+    reviewerName: String
+    revieweeId: String
+    revieweeName: String
+    transactionId: ID
+    rating: Int
+    comment: String
+    createdAt: DateTime
+}
+
+input CreateReviewInput {
+    transactionId: ID!
+
+    "Note de 1 a 5, verifiee cote serveur."
+    rating: Int!
+    comment: String
+}
+
+input UpdateReviewInput {
+    rating: Int!
+    comment: String
+}

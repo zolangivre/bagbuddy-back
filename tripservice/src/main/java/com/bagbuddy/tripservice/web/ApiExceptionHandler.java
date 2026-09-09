@@ -8,6 +8,11 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.NoSuchElementException;
 
+/**
+ * Ne couvre plus que les endpoints service-a-service de /trips/internal, seul REST restant :
+ * un @RestControllerAdvice ne s'applique qu'aux controleurs HTTP, jamais aux resolvers GraphQL,
+ * dont les erreurs passent par GraphQlExceptionResolver.
+ */
 @RestControllerAdvice
 public class ApiExceptionHandler {
 

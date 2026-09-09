@@ -2,6 +2,18 @@ spring:
   application:
     name: transaction-service
 
+  # --- GraphQL ---
+  # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
+  # de chemin (Path=/transactions/**) sans reecriture, et un appel direct au conteneur emprunte
+  # exactement la meme URL. Une seule route, un seul POST : c'est le contrat GraphQL.
+  graphql:
+    http:
+      path: /transactions/graphql
+    graphiql:
+      # Console de developpement, coupee par defaut. GRAPHIQL_ENABLED=true en local.
+      enabled: ${GRAPHIQL_ENABLED:false}
+      path: /transactions/graphiql
+
   datasource:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver

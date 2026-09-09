@@ -1,0 +1,25 @@
+# Paiements. Le webhook Stripe reste volontairement en REST (POST /stripe/webhook) : c'est
+# Stripe qui appelle, authentifie par la signature du payload et non par un jeton porteur.
+
+type Query {
+    "Cle publiable, celle que le front passe a Stripe.js. Rien de secret ici."
+    stripeConfig: StripeConfig!
+}
+
+type Mutation {
+    """
+    Prepare le paiement d'une transaction. Prend l'identifiant de la transaction et non un
+    montant : la somme est derivee du total stocke, lui-meme tarife contre l'annonce. Seul
+    l'acheteur de la transaction peut la declencher.
+    """
+    createPaymentIntent(transactionId: ID!): PaymentIntent!
+}
+
+type StripeConfig {
+    publishableKey: String!
+}
+
+type PaymentIntent {
+    "A remettre a Stripe.js cote navigateur pour confirmer le paiement."
+    clientSecret: String!
+}

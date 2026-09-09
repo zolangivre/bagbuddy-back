@@ -4,6 +4,14 @@ spring:
 
   cloud:
     gateway:
+      # Chaque service expose son propre schema GraphQL sous son prefixe
+      # (/trips/graphql, /transactions/graphql, ...). Les routes restent donc de
+      # simples predicats de chemin, sans reecriture : c'est pour cela que les
+      # services configurent spring.graphql.http.path avec leur prefixe plutot
+      # que le /graphql par defaut.
+      #
+      # Restent en REST derriere ces memes routes : les endpoints /internal
+      # service-a-service et le webhook Stripe, que GraphQL ne sert pas.
       routes:
         - id: trip-service
           uri: ${TRIP_SERVICE_URL}

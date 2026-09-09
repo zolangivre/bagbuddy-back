@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Configuration;
 import jakarta.servlet.DispatcherType;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
@@ -20,8 +21,14 @@ import org.springframework.security.web.SecurityFilterChain;
 import java.util.List;
 
 /**
- * Every endpoint requires a valid Keycloak access token, except POST /users/register: the
- * account it creates is precisely what the caller does not have a token for yet.
+ * Ce service est le seul dont le point d'entree GraphQL est ouvert sans jeton, et c'est
+ * delibere : l'inscription fait partie du meme schema que le reste, et GraphQL n'expose qu'une
+ * seule URL -- on ne peut donc pas ouvrir l'inscription par le chemin, comme le faisait
+ * POST /users/register.
+ *
+ * La consequence est importante : l'authentification n'est plus portee par l'URL mais par
+ * @PreAuthorize sur chaque resolver de UserGraphQlController. Un jeton present mais invalide
+ * reste rejete en 401 par le filtre bearer, avant d'atteindre le schema.
  *
  * The JWKS endpoint is configured
  * separately from the issuers on purpose: inside Docker the services reach Keycloak on
@@ -31,6 +38,9 @@ import java.util.List;
  */
 @Configuration
 @EnableWebSecurity
+// Active @PreAuthorize : sans cela les annotations du controleur GraphQL seraient inertes et
+// l'endpoint ouvert le serait pour de bon.
+@EnableMethodSecurity
 public class SecurityConfig {
 
     @Value("${bagbuddy.auth.jwk-set-uri}")
@@ -55,9 +65,12 @@ public class SecurityConfig {
                         // voit plus de jeton sur la requete interne.
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers("/actuator/health/**").permitAll()
-                        // Sign-up is the one endpoint that cannot require a token: the
-                        // account it creates is what the caller is about to sign in with.
-                        .requestMatchers(HttpMethod.POST, "/users/register").permitAll()
+                        // Console GraphiQL : page statique, sans donnees.
+                        .requestMatchers("/users/graphiql/**").permitAll()
+                        // Le schema porte l'inscription, qui ne peut pas exiger de jeton : le
+                        // point d'entree est donc ouvert, et c'est @PreAuthorize resolver par
+                        // resolver qui exige l'authentification pour tout le reste.
+                        .requestMatchers(HttpMethod.POST, "/users/graphql").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(jwtAuthenticationConverter())));

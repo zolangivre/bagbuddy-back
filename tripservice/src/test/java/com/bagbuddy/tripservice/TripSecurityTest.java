@@ -10,16 +10,27 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+/**
+ * Les regles de securite sont testees sur la vraie surface HTTP : POST /trips/graphql traverse
+ * la chaine de filtres, exactement comme un appel du front.
+ *
+ * Deux niveaux de refus coexistent en GraphQL et le test distingue les deux :
+ *  - pas de jeton  -> 401 rendu par Spring Security, la requete n'atteint jamais le schema ;
+ *  - jeton valide mais droit manquant -> 200 avec errors[].extensions.classification = FORBIDDEN.
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class TripSecurityTest {
@@ -39,6 +50,18 @@ class TripSecurityTest {
     @BeforeEach
     void reset() {
         tripRepository.deleteAll();
+    }
+
+    private MockHttpServletRequestBuilder graphql(String query, Map<String, Object> variables)
+            throws Exception {
+        return post("/trips/graphql")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(
+                        Map.of("query", query, "variables", variables)));
+    }
+
+    private MockHttpServletRequestBuilder graphql(String query) throws Exception {
+        return graphql(query, Map.of());
     }
 
     private Trip aliceTrip() {
@@ -64,78 +87,109 @@ class TripSecurityTest {
 
     @Test
     void anonymousCallersAreRejected() throws Exception {
-        mockMvc.perform(get("/trips")).andExpect(status().isUnauthorized());
-        mockMvc.perform(post("/trips").contentType(MediaType.APPLICATION_JSON).content("{}"))
-                .andExpect(status().isUnauthorized());
-        mockMvc.perform(delete("/trips/1")).andExpect(status().isUnauthorized());
+        mockMvc.perform(graphql("{ trips { id } }")).andExpect(status().isUnauthorized());
+        mockMvc.perform(graphql("mutation { deleteTrip(id: 1) }")).andExpect(status().isUnauthorized());
     }
 
     @Test
     void otherMembersDoNotSeeContactDetailsOrPayoutAccount() throws Exception {
         aliceTrip();
 
-        mockMvc.perform(get("/trips").with(jwt().jwt(j -> j.subject(BOB))))
+        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { name email phone } } }")
+                        .with(jwt().jwt(j -> j.subject(BOB))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].userInfo.name").value("Alice"))
-                .andExpect(jsonPath("$[0].userInfo.email").doesNotExist())
-                .andExpect(jsonPath("$[0].userInfo.phone").doesNotExist())
-                .andExpect(jsonPath("$[0].stripeAccountId").doesNotExist());
+                .andExpect(jsonPath("$.data.trips[0].userInfo.name").value("Alice"))
+                .andExpect(jsonPath("$.data.trips[0].userInfo.email").doesNotExist())
+                .andExpect(jsonPath("$.data.trips[0].userInfo.phone").doesNotExist())
+                .andExpect(jsonPath("$.data.trips[0].stripeAccountId").doesNotExist());
     }
 
     @Test
     void ownerStillSeesTheirOwnContactDetails() throws Exception {
         aliceTrip();
 
-        mockMvc.perform(get("/trips").with(jwt().jwt(j -> j.subject(ALICE))))
+        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { email } } }")
+                        .with(jwt().jwt(j -> j.subject(ALICE))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].userInfo.email").value("alice@example.com"))
-                .andExpect(jsonPath("$[0].stripeAccountId").value("acct_alice"));
+                .andExpect(jsonPath("$.data.trips[0].userInfo.email").value("alice@example.com"))
+                .andExpect(jsonPath("$.data.trips[0].stripeAccountId").value("acct_alice"));
+    }
+
+    @Test
+    void thePayoutAccountIsReadableOnlyByItsOwner() throws Exception {
+        aliceTrip();
+
+        mockMvc.perform(graphql("query($u: String!) { payoutAccount(userId: $u) }",
+                        Map.of("u", ALICE)).with(jwt().jwt(j -> j.subject(BOB))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
+
+        mockMvc.perform(graphql("query($u: String!) { payoutAccount(userId: $u) }",
+                        Map.of("u", ALICE)).with(jwt().jwt(j -> j.subject(ALICE))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.payoutAccount").value("acct_alice"));
     }
 
     @Test
     void aTripCannotBeEditedOrDeletedByAnotherMember() throws Exception {
         Trip trip = aliceTrip();
-        String body = objectMapper.writeValueAsString(trip);
 
-        mockMvc.perform(put("/trips/" + trip.getId())
-                        .with(jwt().jwt(j -> j.subject(BOB)))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isForbidden());
+        mockMvc.perform(graphql("""
+                        mutation($id: ID!, $input: TripInput!) {
+                            updateTrip(id: $id, input: $input) { id }
+                        }
+                        """, Map.of("id", trip.getId(), "input", Map.of("departureAirport", "ORY")))
+                        .with(jwt().jwt(j -> j.subject(BOB))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
 
-        mockMvc.perform(delete("/trips/" + trip.getId()).with(jwt().jwt(j -> j.subject(BOB))))
-                .andExpect(status().isForbidden());
+        mockMvc.perform(graphql("mutation($id: ID!) { deleteTrip(id: $id) }",
+                        Map.of("id", trip.getId())).with(jwt().jwt(j -> j.subject(BOB))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("FORBIDDEN"));
 
         assertThat(tripRepository.findById(trip.getId())).isPresent();
     }
 
     @Test
     void ownershipComesFromTheTokenNotTheRequestBody() throws Exception {
-        String spoofed = """
-                {
-                  "userId": "alice-sub",
-                  "userInfo": {"sub": "alice-sub", "email": "attacker@example.com", "phone": "+000"},
-                  "departureAirport": "CDG",
-                  "arrivalAirport": "JFK",
-                  "departureDate": "%s",
-                  "arrivalDate": "%s",
-                  "totalWeightAvailable": 10,
-                  "remainingWeight": 10,
-                  "pricePerKg": 5
-                }
-                """.formatted(LocalDateTime.now().plusDays(5), LocalDateTime.now().plusDays(6));
+        Map<String, Object> input = Map.of(
+                "departureAirport", "CDG",
+                "arrivalAirport", "JFK",
+                "departureDate", LocalDateTime.now().plusDays(5).toString(),
+                "arrivalDate", LocalDateTime.now().plusDays(6).toString(),
+                "totalWeightAvailable", 10,
+                "remainingWeight", 10,
+                "pricePerKg", 5,
+                "profile", Map.of("phone", "+000"));
 
-        mockMvc.perform(post("/trips")
-                        .with(jwt().jwt(j -> j.subject(BOB).claim("email", "bob@example.com")))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(spoofed))
+        mockMvc.perform(graphql("""
+                        mutation($input: TripInput!) {
+                            createTrip(input: $input) { userId userInfo { sub email } }
+                        }
+                        """, Map.of("input", input))
+                        .with(jwt().jwt(j -> j.subject(BOB).claim("email", "bob@example.com"))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.userId").value(BOB));
+                .andExpect(jsonPath("$.data.createTrip.userId").value(BOB));
 
         Trip stored = tripRepository.findAll().get(0);
         assertThat(stored.getUserId()).isEqualTo(BOB);
         assertThat(stored.getUserInfo().getSub()).isEqualTo(BOB);
         assertThat(stored.getUserInfo().getEmail()).isEqualTo("bob@example.com");
+    }
+
+    @Test
+    void theSchemaItselfRefusesToTakeAnOwnerFromTheClient() throws Exception {
+        // TripInput n'expose ni userId ni l'identite de l'instantane : l'usurpation est
+        // refusee par le typage, avant meme d'atteindre un resolver.
+        mockMvc.perform(graphql("""
+                        mutation($input: TripInput!) { createTrip(input: $input) { id } }
+                        """, Map.of("input", Map.of("userId", ALICE, "departureAirport", "CDG")))
+                        .with(jwt().jwt(j -> j.subject(BOB))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("ValidationError"));
+
+        assertThat(tripRepository.findAll()).isEmpty();
     }
 
     @Test
@@ -147,7 +201,7 @@ class TripSecurityTest {
 
         mockMvc.perform(get("/trips/internal/" + trip.getId())
                         .with(jwt().jwt(j -> j.subject("stripeservice"))
-                                .authorities(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_SERVICE"))))
+                                .authorities(new SimpleGrantedAuthority("ROLE_SERVICE"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.userInfo.email").value("alice@example.com"));
     }
@@ -156,9 +210,9 @@ class TripSecurityTest {
     void capacityCanOnlyBeReservedByAService_andNeverBeyondWhatIsLeft() throws Exception {
         Trip trip = aliceTrip();
         var serviceRole = jwt().jwt(j -> j.subject("transactionservice"))
-                .authorities(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_SERVICE"));
+                .authorities(new SimpleGrantedAuthority("ROLE_SERVICE"));
 
-        // Un acheteur ne peut plus decrementer le poids restant lui-meme.
+        // Un acheteur ne peut pas decrementer le poids restant lui-meme.
         mockMvc.perform(post("/trips/internal/" + trip.getId() + "/reserve")
                         .with(jwt().jwt(j -> j.subject(BOB)))
                         .contentType(MediaType.APPLICATION_JSON)

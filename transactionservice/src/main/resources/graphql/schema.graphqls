@@ -1,0 +1,119 @@
+# Reservations. Une transaction porte les coordonnees des deux parties : toutes les lectures
+# sont donc reservees aux participants, verifie dans TransactionService.
+
+scalar DateTime
+scalar BigDecimal
+scalar Long
+
+type Query {
+    "Les transactions de l'appelant, achats et ventes confondus, les plus recentes d'abord."
+    myTransactions: [Transaction!]!
+
+    transaction(id: ID!): Transaction!
+
+    "Reserve a l'interesse lui-meme : un vendeur ne lit pas les ventes d'un autre."
+    transactionsBySeller(sellerId: String!): [Transaction!]!
+    transactionsByBuyer(buyerId: String!): [Transaction!]!
+    transactionsByUser(userId: String!): [Transaction!]!
+    transactionCount(userId: String!): Long!
+
+    "Somme des transactions terminees des deux cotes."
+    totalEarned(sellerId: String!): Float!
+    totalSpent(buyerId: String!): Float!
+}
+
+type Mutation {
+    """
+    Cree une reservation. Le prix n'est pas fourni par le client : il est calcule contre
+    l'annonce detenue par tripservice (pricePerKg x weight).
+    """
+    createTransaction(input: CreateTransactionInput!): Transaction!
+
+    """
+    Fait avancer la reservation dans la machine a etats. Seuls les champs de statut, le poids
+    et les drapeaux d'avis sont acceptes ; l'argent et le paiement ne sont jamais ecrits ici.
+    """
+    updateTransaction(id: ID!, input: UpdateTransactionInput!): Transaction!
+
+    deleteTransaction(id: ID!): Boolean!
+}
+
+type Transaction {
+    id: ID!
+    listingId: ID
+    listingInfo: ListingInfo
+    buyerInfo: Party
+    buyerId: String
+    sellerId: String
+
+    "Vocabulaire porte par le front (TRANSACTION_STATUS) ; les transitions, elles, sont ici."
+    sellerStatus: String
+    buyerStatus: String
+    weight: BigDecimal
+
+    "Calcule par le serveur, jamais accepte du client."
+    total: BigDecimal
+    sellerReview: Boolean
+    buyerReview: Boolean
+
+    "Ecrits uniquement par le webhook Stripe signe, via l'endpoint interne."
+    stripePaymentIntentId: String
+    stripeCurrency: String
+    stripeAmount: Long
+    paidAt: DateTime
+    createdAt: DateTime
+}
+
+"Instantane d'une partie. Visible seulement des participants de la transaction."
+type Party {
+    sub: String
+    name: String
+    givenName: String
+    familyName: String
+    username: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+    email: String
+    phone: String
+}
+
+"Instantane de l'annonce au moment de la reservation. Les dates y sont stockees en texte."
+type ListingInfo {
+    sellerUserInfo: Party
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: String
+    arrivalDate: String
+    totalWeightAvailable: Float!
+    remainingWeight: Float!
+    pricePerKg: Float!
+    conditions: String
+    createdAt: String
+}
+
+input CreateTransactionInput {
+    listingId: ID!
+    weight: BigDecimal!
+
+    "Champs libres du profil acheteur. L'identite vient du jeton."
+    profile: ProfileInput
+}
+
+input ProfileInput {
+    bio: String
+    location: String
+    phone: String
+}
+
+input UpdateTransactionInput {
+    sellerStatus: String
+    buyerStatus: String
+
+    "Pris en compte uniquement quand la transition le prevoit ; retarife contre l'annonce."
+    weight: BigDecimal
+
+    "Chaque partie ne pilote que son propre drapeau."
+    sellerReview: Boolean
+    buyerReview: Boolean
+}

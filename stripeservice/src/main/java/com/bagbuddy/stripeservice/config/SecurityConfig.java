@@ -46,6 +46,9 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health/**").permitAll()
+                        // Console GraphiQL : page statique, sans donnees. Les requetes
+                        // qu'elle emet passent par /stripe/graphql et restent authentifiees.
+                        .requestMatchers("/stripe/graphiql/**").permitAll()
                         .requestMatchers(org.springframework.http.HttpMethod.POST, "/stripe/webhook").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt

@@ -1,45 +1,86 @@
 package com.bagbuddy.reviewservice.client;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpHeaders;
+import org.springframework.graphql.ResponseError;
+import org.springframework.graphql.client.FieldAccessException;
+import org.springframework.graphql.client.HttpSyncGraphQlClient;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.util.List;
 import java.util.NoSuchElementException;
 
 /**
- * Reads a transaction using the caller's own token. transactionservice already refuses to
- * serve a transaction to somebody who is not a party to it, so a 403 here is exactly the
- * answer we want: you cannot review a deal you were not part of.
+ * Lit une transaction avec le jeton de l'appelant. transactionservice refuse deja de servir une
+ * transaction a qui n'y a pas pris part : un refus ici est donc exactement la reponse voulue --
+ * on ne note pas une affaire dont on n'a pas fait partie.
+ *
+ * L'appel passe par le schema GraphQL du service et ne demande que les champs reellement
+ * utilises pour attribuer l'avis, la ou l'ancien GET /transactions/{id} rapatriait toute la
+ * transaction, coordonnees des deux parties comprises.
  */
 @Component
 public class TransactionClient {
 
-    private final RestClient restClient;
+    private static final String TRANSACTION_DOCUMENT = """
+            query Transaction($id: ID!) {
+                transaction(id: $id) {
+                    id
+                    buyerId
+                    sellerId
+                    buyerInfo { sub name }
+                    listingInfo { sellerUserInfo { sub name } }
+                }
+            }
+            """;
+
+    private final HttpSyncGraphQlClient graphQlClient;
 
     public TransactionClient(RestClient.Builder builder,
                              @Value("${bagbuddy.transaction-service.url}") String transactionServiceUrl) {
-        this.restClient = builder.baseUrl(transactionServiceUrl).build();
+        this.graphQlClient = HttpSyncGraphQlClient.builder(
+                        builder.baseUrl(transactionServiceUrl + "/transactions/graphql"))
+                .build();
     }
 
     public TransactionSnapshot fetchAsCaller(Long transactionId, String callerToken) {
         try {
-            return restClient.get()
-                    .uri("/transactions/{id}", transactionId)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + callerToken)
-                    .retrieve()
-                    .body(TransactionSnapshot.class);
+            return graphQlClient.mutate()
+                    .headers(headers -> headers.setBearerAuth(callerToken))
+                    .build()
+                    .document(TRANSACTION_DOCUMENT)
+                    .variable("id", transactionId)
+                    .retrieveSync("transaction")
+                    .toEntity(TransactionSnapshot.class);
+        } catch (FieldAccessException ex) {
+            // En GraphQL le transport reste 200 : le refus se lit dans errors[].classification.
+            throw translate(ex.getResponse().getErrors(), transactionId);
         } catch (RestClientResponseException ex) {
+            // Jeton absent ou invalide : rejete par la chaine de securite avant le schema.
             int status = ex.getStatusCode().value();
-            if (status == 403 || status == 401) {
+            if (status == 401 || status == 403) {
                 throw new AccessDeniedException("Caller is not a party to transaction " + transactionId);
-            }
-            if (status == 404) {
-                throw new NoSuchElementException("Transaction not found: " + transactionId);
             }
             throw ex;
         }
+    }
+
+    private RuntimeException translate(List<ResponseError> errors, Long transactionId) {
+        String classification = errors.isEmpty() ? null : classificationOf(errors.get(0));
+        if ("FORBIDDEN".equals(classification) || "UNAUTHORIZED".equals(classification)) {
+            return new AccessDeniedException("Caller is not a party to transaction " + transactionId);
+        }
+        if ("NOT_FOUND".equals(classification)) {
+            return new NoSuchElementException("Transaction not found: " + transactionId);
+        }
+        return new IllegalStateException("transactionservice refused the read for transaction "
+                + transactionId + " (" + classification + ")");
+    }
+
+    private static String classificationOf(ResponseError error) {
+        Object classification = error.getExtensions().get("classification");
+        return classification != null ? classification.toString() : String.valueOf(error.getErrorType());
     }
 }

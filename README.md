@@ -4,6 +4,11 @@ Backend en microservices Spring Boot (Eureka, API gateway, trip / transaction /
 review / stripe / user services) + Keycloak pour l'authentification, orchestrés
 avec Docker Compose pour le développement local.
 
+L'API est en **GraphQL** : chaque service expose son propre schéma sous son
+préfixe de chemin (`/trips/graphql`, `/transactions/graphql`, ...). Il ne reste
+du REST que là où GraphQL n'a pas de sens — webhook Stripe et appels
+service-à-service (voir « API GraphQL » plus bas).
+
 C'est le repo backend de BagBuddy. Le front web (Angular) vit dans un repo
 séparé : `bagbuddy-front`. Les deux se lancent indépendamment ; le front tape
 sur la gateway en `http://localhost:8080` et sur Keycloak en
@@ -70,6 +75,65 @@ faut de vraies clés de test `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` /
 `STRIPE_WEBHOOK_SECRET` dans `.env` pour servir à quelque chose. Décommente son
 bloc une fois que tu les as.
 
+## API GraphQL
+
+Un schéma par service, servi sous le préfixe du service : la gateway route par
+simple préfixe de chemin, sans réécriture, et un appel direct au conteneur
+emprunte exactement la même URL.
+
+| Service | Endpoint (via la gateway) | Console GraphiQL (accès direct, dev) |
+| --- | --- | --- |
+| trip-service        | `POST http://localhost:8080/trips/graphql`        | http://localhost:8082/trips/graphiql |
+| transaction-service | `POST http://localhost:8080/transactions/graphql` | http://localhost:8083/transactions/graphiql |
+| review-service      | `POST http://localhost:8080/reviews/graphql`      | http://localhost:8084/reviews/graphiql |
+| user-service        | `POST http://localhost:8080/users/graphql`        | http://localhost:8086/users/graphiql |
+| stripe-service      | `POST http://localhost:8080/stripe/graphql`       | http://localhost:8085/stripe/graphiql |
+
+Le schéma de chaque service est lisible dans
+`<service>/src/main/resources/graphql/schema.graphqls` — c'est la source de
+vérité de ce que l'API accepte et renvoie. La console GraphiQL est activée par
+`GRAPHIQL_ENABLED=true` (déjà positionné dans `docker-compose.dev.yml`) et
+coupée par défaut ailleurs.
+
+Un appel ressemble à ceci :
+
+```bash
+curl http://localhost:8080/trips/graphql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ activeTrips { id departureAirport arrivalAirport pricePerKg userInfo { name } } }"}'
+```
+
+Trois scalaires maison complètent les types de base de GraphQL, qui n'en a que
+cinq : `DateTime` (ISO-8601 local), `BigDecimal` (prix et poids, en décimal
+exact — sérialiser un montant en `Float` perdrait de la précision) et `Long`.
+
+### Ce qui reste volontairement en REST
+
+| Endpoint | Pourquoi |
+| --- | --- |
+| `POST /stripe/webhook` | c'est Stripe qui appelle, avec le corps brut nécessaire à la vérification de signature ; l'appelant ne choisit pas ses champs |
+| `/trips/internal/**`, `/transactions/internal/**` | appels service-à-service, un seul appelant et une seule forme de réponse ; les garder en REST évite d'ouvrir `/graphql` au jeton de service |
+| `/actuator/health/**` | sondes de santé |
+
+### Lire les erreurs
+
+En GraphQL le transport répond `200` même quand l'opération échoue : le sens est
+porté par `errors[].extensions.classification`, et c'est cela que le client doit
+lire, pas le code HTTP.
+
+| classification | signification |
+| --- | --- |
+| `UNAUTHORIZED`   | authentification manquante |
+| `FORBIDDEN`      | jeton valide, mais droit manquant (annonce d'un autre, transaction dont on n'est pas partie…) |
+| `NOT_FOUND`      | ressource inexistante |
+| `BAD_REQUEST`    | règle métier violée (transition d'état invalide, note hors 1–5, mot de passe trop court…) |
+| `ValidationError`| la requête ne respecte pas le schéma : champ inconnu, type incorrect, argument manquant |
+
+Le seul code HTTP qui reste porteur de sens est le `401` : sans jeton, la chaîne
+de sécurité rejette la requête avant qu'elle n'atteigne le schéma. Une exception,
+`userservice`, détaillée plus bas.
+
 ## Authentification
 
 Tous les services sont des **resource servers OAuth2** : chaque requête doit
@@ -77,14 +141,24 @@ porter un `Authorization: Bearer <access_token>` Keycloak valide, sinon c'est
 401. Le front obtient ce token en PKCE auprès de Keycloak, puis appelle la
 gateway avec.
 
+**Une exception, `userservice`.** L'inscription fait partie du même schéma que
+le reste, et GraphQL n'expose qu'une seule URL : on ne peut donc plus ouvrir
+l'inscription par le chemin comme le faisait `POST /users/register`.
+`/users/graphql` est par conséquent le seul endpoint GraphQL du projet
+atteignable sans jeton, et l'authentification y est portée opération par
+opération, par `@PreAuthorize` sur chaque resolver. Conséquence pratique : toute
+opération ajoutée à `UserGraphQlController` doit recevoir son `@PreAuthorize`,
+sans quoi elle devient anonyme. `UserProfileSecurityTest` passe en revue chaque
+opération du schéma sans jeton pour verrouiller cette règle.
+
 Au-delà de l'authentification, chaque service applique ses propres règles de
 propriété : on ne modifie que ses propres annonces, on ne lit que les
 transactions dont on est partie, et les coordonnées (email, téléphone) d'un
 autre membre ne sortent jamais des endpoints de navigation.
 
-Deux endpoints ne sont **pas** joignables avec un token utilisateur — ils
+Trois endpoints ne sont **pas** joignables avec un token utilisateur — ils
 exigent le rôle realm `service`, porté uniquement par le client confidentiel
-`bagbuddy` :
+`bagbuddy`. Ce sont aussi les seuls appels service-à-service restés en REST :
 
 | Endpoint                                    | Appelé par           | Pourquoi |
 | ------------------------------------------- | -------------------- | -------- |
@@ -109,11 +183,15 @@ donc un client public avec le **grant `password`** (direct access grant) activé
 et le flux redirection désactivé, et c'est `userservice` qui relaie vers l'API
 d'administration ce qu'un navigateur ne peut pas porter :
 
-| Appel | Jeton | Effet |
+| Opération (sur `/users/graphql`) | Jeton | Effet |
 | --- | --- | --- |
-| `POST /users/register` | aucun | crée le compte Keycloak (email = identifiant) |
-| `PUT /users/me/identity` | utilisateur | prénom, nom, email |
-| `PUT /users/me/password` | utilisateur | vérifie l'actuel, puis le remplace |
+| `mutation { register(input: …) }` | aucun | crée le compte Keycloak (email = identifiant) |
+| `mutation { updateIdentity(input: …) }` | utilisateur | prénom, nom, email |
+| `mutation { changePassword(input: …) }` | utilisateur | vérifie l'actuel, puis le remplace |
+
+Les deux dernières agissent sur le `sub` du jeton : aucune ne prend
+d'identifiant d'utilisateur en argument, pour qu'un bug ne puisse pas devenir la
+modification du compte d'autrui.
 
 Deux réglages d'origine à tenir alignés si tu sers le front ailleurs que sur
 `http://localhost:4200` : les **web origins** du client `bagbuddy-web` dans le
@@ -143,9 +221,11 @@ mémoire, sans Docker ni Keycloak :
 cd tripservice && ./mvnw test
 ```
 
-`tripservice`, `transactionservice` et `userservice` embarquent des tests de
-sécurité qui vérifient concrètement les règles ci-dessus (accès anonyme refusé,
-propriété, masquage des coordonnées, montant non falsifiable).
+Les cinq services métier embarquent des tests de sécurité qui vérifient
+concrètement les règles ci-dessus, en tapant sur le vrai endpoint GraphQL à
+travers toute la chaîne de filtres : accès anonyme refusé, propriété, masquage
+des coordonnées, montant non falsifiable, et refus par le schéma lui-même des
+champs qu'un client ne doit pas pouvoir écrire (`userId`, `total`, `sellerId`…).
 
 ## Ajouter un microservice
 

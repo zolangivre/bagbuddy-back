@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Spring Boot microservices backend for BagBuddy. This repo is backend-only: the web front (Angular) lives in a separate repo, `bagbuddy-front`, and the historical Expo mobile app in the `BagBuddy` monorepo. Nothing here imports front code, and no path in this repo resolves into a front repo. Each service is an independent Maven project (Java 21, Spring Boot 3.5.6, own Postgres database) under its own directory: `eurekaserver`, `apigateway`, `tripservice`, `transactionservice`, `reviewservice`, `stripeservice`, `userservice`. Keycloak is the identity provider; every service validates the resulting JWT itself as an OAuth2 resource server (see Auth).
+Spring Boot microservices backend for BagBuddy. **The public API is GraphQL**: each business service exposes its own schema under its own path prefix (`/trips/graphql`, `/transactions/graphql`, `/reviews/graphql`, `/stripe/graphql`, `/users/graphql`) — see GraphQL API below. REST survives only where GraphQL does not fit: the Stripe webhook, the service-to-service `/internal/**` endpoints, and actuator health. This repo is backend-only: the web front (Angular) lives in a separate repo, `bagbuddy-front`, and the historical Expo mobile app in the `BagBuddy` monorepo. Nothing here imports front code, and no path in this repo resolves into a front repo. Each service is an independent Maven project (Java 21, Spring Boot 3.5.6, own Postgres database) under its own directory: `eurekaserver`, `apigateway`, `tripservice`, `transactionservice`, `reviewservice`, `stripeservice`, `userservice`. Keycloak is the identity provider; every service validates the resulting JWT itself as an OAuth2 resource server (see Auth).
 
 ## Commands
 
@@ -32,7 +32,11 @@ Running a service this way still needs its Postgres DB and `DATABASE_URL`/`PORT`
 
 ### Service layout
 
-Every service follows the same layered package structure: `controller/` (REST endpoints, `@RequestMapping` per resource) → `service/` (business logic) → `repository/` (Spring Data JPA) → `model/` (JPA entities). Controllers are thin; look in `service/` for actual logic.
+Every service follows the same layered package structure: `controller/` (`@Controller` with `@QueryMapping`/`@MutationMapping` resolvers) → `service/` (business logic) → `repository/` (Spring Data JPA) → `model/` (JPA entities). Resolvers are thin; look in `service/` for actual logic — the migration to GraphQL deliberately did not move any rule out of the service layer.
+
+Each service also carries, in `src/main/resources/graphql/schema.graphqls`, the schema that defines its public surface. Treat that file as part of the contract: what an input type does not expose cannot be written, and several ownership rules are now enforced by the type system rather than by silently ignoring fields (`TripInput` has no `userId`, `CreateTransactionInput` has no `total`/`sellerId`/`paidAt`, `CreateReviewInput` has no `reviewerId`/`revieweeId`).
+
+`config/GraphQlScalarConfig.java` (duplicated per service, like the other config classes) registers the three scalars GraphQL lacks: `DateTime` (ISO-8601 local, the format Jackson already produced), `BigDecimal` (money and weights, in exact decimal — a `Float` would lose precision) and `Long`. `web/GraphQlExceptionResolver.java` replaces the REST `@RestControllerAdvice` for GraphQL: it maps `AccessDeniedException` → `FORBIDDEN`/`UNAUTHORIZED`, `NoSuchElementException` → `NOT_FOUND`, `IllegalArgumentException`/`ConstraintViolationException` → `BAD_REQUEST`, and leaves everything else as a generic `INTERNAL_ERROR` so nothing internal leaks. In GraphQL the transport stays `200`: the meaning is in `errors[].extensions.classification`, which is what tests assert on.
 
 ### Routing: static URLs, not service discovery
 
@@ -46,6 +50,8 @@ Every service follows the same layered package structure: `controller/` (REST en
 /users/**        -> ${USER_SERVICE_URL}
 ```
 
+A single `/graphql` endpoint per service would have broken this path-prefix routing, so each service sets `spring.graphql.http.path` to its own prefix (`/trips/graphql`, …) instead of the default `/graphql`. The gateway therefore needed no rewrite filter, and hitting a container directly uses the exact same URL. `spring.graphql.graphiql` follows the same convention (`/trips/graphiql`, …) and is off unless `GRAPHIQL_ENABLED=true` — `docker-compose.dev.yml` sets it. Don't add a new service without giving it this prefixed path, or its schema will answer on `/graphql` and be unroutable.
+
 Those env vars are set on the `api-gateway` container in `docker-compose.dev.yml` to the other containers' docker-compose service names (e.g. `http://trip-service:8082`). `userservice` is now part of the routed stack (`/users/**` -> `http://user-service:8086`) and enabled in `docker-compose.dev.yml`.
 
 The gateway does **not** validate tokens — it only routes. Each downstream service validates the bearer token itself (see Auth), so hitting a service directly on its published port is no weaker than going through the gateway.
@@ -56,19 +62,21 @@ Most services hardcode their `server.port` default to `8082` in `application.yml
 
 ### Data model: front-owned state machine, denormalized user/listing info
 
-`Transaction.sellerStatus` / `buyerStatus` are plain `String` columns and the status *vocabulary* still lives in the front app (`TRANSACTION_STATUS` enum) — the backend does not validate the values, so adding or renaming a status means changing both repos by hand. What the backend does enforce is *who* may move *which* field: `update()` lets the buyer set only `buyerStatus`/`buyerReview` and the seller only `sellerStatus`/`sellerReview`. The initial value on creation is server-set from `bagbuddy.transaction.initial-status` (`TRANSACTION_INITIAL_STATUS`, default `pending`) — align it with the front's initial status.
+`Transaction.sellerStatus` / `buyerStatus` are plain `String` columns and the status *vocabulary* still lives in the front app (`TRANSACTION_STATUS` enum) — the backend does not validate the values, so adding or renaming a status means changing both repos by hand. What the backend does enforce is *who* may move *which* field: `update()` lets the buyer set only `buyerStatus`/`buyerReview` and the seller only `sellerStatus`/`sellerReview`, reached through the `updateTransaction` mutation. The initial value on creation is server-set from `bagbuddy.transaction.initial-status` (`TRANSACTION_INITIAL_STATUS`, default `pending`) — align it with the front's initial status.
 
-Money is never client-supplied. `TransactionService.create()` fetches the listing from tripservice and computes `total = pricePerKg x weight` itself; `weight`, `total`, `listingInfo`, `paidAt` and the `stripe*` columns are not writable through `PUT /transactions/{id}`. `paidAt`/`stripe*` are only ever written by `markPaid()`, reached through the service-role internal endpoint from a signature-verified Stripe webhook.
+Money is never client-supplied. `TransactionService.create()` fetches the listing from tripservice and computes `total = pricePerKg x weight` itself; `total`, `listingInfo`, `paidAt` and the `stripe*` columns are absent from `UpdateTransactionInput` altogether, so the schema rejects them outright instead of silently ignoring them — `TransactionSecurityTest` asserts exactly that. `weight` is accepted there but only honoured when the requested transition calls for a re-pricing, itself computed from the listing. `paidAt`/`stripe*` are only ever written by `markPaid()`, reached through the service-role internal endpoint from a signature-verified Stripe webhook.
 
 `Trip`, `Transaction`, and `Review` all embed snapshots of user info (`@Embeddable UserInfo`: email, name, phone, bio, etc., keyed by Keycloak `sub`) and, for transactions, listing info (`@Embeddable ListingInfo`) directly on the record via `@Embedded`/`@AttributeOverrides`, rather than joining to a users table — there is no shared user table these services read from. `userservice` is the only service with its own `User` JPA entity, and it is the place to add profile data rather than widening the embedded snapshots.
 
-`Trip.remainingWeight` is decremented server-side by `TripService.reserveCapacity()` (row-locked via `findByIdForUpdate`) when transactionservice creates a booking — the front must not decrement it, and could not anyway now that `PUT /trips/{id}` is owner-only. Deleting a transaction does not give the capacity back; that is a known gap, not an oversight to fix silently.
+`Trip.remainingWeight` is decremented server-side by `TripService.reserveCapacity()` (row-locked via `findByIdForUpdate`) when transactionservice creates a booking — the front must not decrement it, and could not anyway now that the `updateTrip` mutation is owner-only. Deleting a transaction does not give the capacity back; that is a known gap, not an oversight to fix silently.
 
 `Trip.active` is computed automatically in `TripListener` (a JPA `@PrePersist`/`@PreUpdate` entity listener), based on `remainingWeight > 0` and `departureDate` being in the future — don't set it directly, update `remainingWeight`/`departureDate` instead.
 
 ### Auth
 
-Every service is an OAuth2 **resource server**: `spring-boot-starter-oauth2-resource-server` plus a `config/SecurityConfig.java` that requires a valid Keycloak access token on every request (`anyRequest().authenticated()`), with only `/actuator/health/**` and the Stripe webhook left open. Anonymous calls get 401, with one exception: `POST /users/register` on userservice, which is what a caller uses precisely because it has no token yet. The web front authenticates against Keycloak directly (direct access grant from its own sign-in form) and calls the gateway with the bearer token; the Expo app still uses OIDC/PKCE.
+Every service is an OAuth2 **resource server**: `spring-boot-starter-oauth2-resource-server` plus a `config/SecurityConfig.java` that requires a valid Keycloak access token on every request (`anyRequest().authenticated()`), with only `/actuator/health/**`, the GraphiQL console page and the Stripe webhook left open. Anonymous calls get 401 — the security chain rejects them before the schema is reached, so an anonymous GraphQL call is a genuine HTTP 401 and not a `200` carrying an error.
+
+**`userservice` is the deliberate exception, and the one spot to be careful in.** Sign-up belongs to the same schema as everything else and GraphQL exposes a single URL, so the path-based `permitAll` that used to cover `POST /users/register` is no longer expressible. `POST /users/graphql` is therefore open, and authentication is carried operation by operation by `@PreAuthorize("isAuthenticated()")` on each resolver of `UserGraphQlController` (with `@EnableMethodSecurity` on the config). **Any operation added to that controller must carry `@PreAuthorize` or it becomes anonymous.** `UserProfileSecurityTest.anonymousCallersAreRejected` walks every operation of the schema without a token and asserts `UNAUTHORIZED`, which is what keeps this honest. A token that is present but invalid is still rejected with 401 by the bearer filter, before the schema. The web front authenticates against Keycloak directly (direct access grant from its own sign-in form) and calls the gateway with the bearer token; the Expo app still uses OIDC/PKCE.
 
 Three deliberate configuration choices in `SecurityConfig`:
 
@@ -86,17 +94,21 @@ Two endpoints are unreachable with a user token and require the `service` realm 
 | `POST /trips/internal/{id}/reserve` | transactionservice | decrement `remainingWeight` under a row lock |
 | `POST /transactions/internal/{id}/payment` | stripeservice | record a payment confirmed by a signed webhook |
 
+These three stayed REST on purpose: one caller, one response shape, and keeping them off `/graphql` means the service-role token never gets a foothold on the public schema. They live in `TripInternalController` / `TransactionInternalController`, and the `web/ApiExceptionHandler` still present in those two services now covers only them — a `@RestControllerAdvice` never sees a GraphQL resolver.
+
+The other two service-to-service reads did move to GraphQL, because they are made *with the caller's own token* precisely so the downstream service applies its own participant check: `reviewservice` and `stripeservice` both read a transaction through `HttpSyncGraphQlClient` against `/transactions/graphql`, asking only for the fields they need rather than pulling the whole transaction. Their `TransactionClient` translates `errors[].extensions.classification` back into `AccessDeniedException` / `NoSuchElementException`, since a refusal arrives as a `200`.
+
 The `bagbuddy` client secret comes from `KEYCLOAK_SERVICE_CLIENT_SECRET` — injected into Keycloak at realm import via `${KEYCLOAK_SERVICE_CLIENT_SECRET}` in `bagbuddy-realm.json`, and read by transactionservice/stripeservice for their client-credentials grant. It is never committed. That service account holds only the `service` realm role; it deliberately does **not** have `realm-management`/`realm-admin`.
 
-`userservice` owns application-side profiles (bio, location, phone, Stripe account) keyed by the Keycloak `sub`, and mirrors identity claims from the token on each `/users/me` call. `GET /users/{sub}` returns a `PublicUserProfile` with no email, phone or payout account.
+`userservice` owns application-side profiles (bio, location, phone, Stripe account) keyed by the Keycloak `sub`, and mirrors identity claims from the token on each `me` query — so a token missing a claim blanks the matching field, which is intended. The `user(sub:)` query returns a `PublicUserProfile` type that has no email, phone or payout account field at all: asking for one is a schema error, not a quietly omitted value.
 
-It also carries the **account lifecycle** (`controller/AccountController.java`), because the web front serves its own sign-up and account screens instead of Keycloak's pages. Creating a user, changing an email and setting a password are admin operations that a browser can never hold the credentials for, so they are proxied here:
+It also carries the **account lifecycle** (folded into `UserGraphQlController` alongside the profile operations — GraphQL exposes one endpoint per service, so the split into a separate `AccountController` no longer had anything to split), because the web front serves its own sign-up and account screens instead of Keycloak's pages. Creating a user, changing an email and setting a password are admin operations that a browser can never hold the credentials for, so they are proxied here:
 
-| Endpoint | Token | What it does |
+| Operation (on `/users/graphql`) | Token | What it does |
 | --- | --- | --- |
-| `POST /users/register` | none | creates an enabled Keycloak user, email as username, password permanent |
-| `PUT /users/me/identity` | user's | first/last name, email — a new email resets `emailVerified` |
-| `PUT /users/me/password` | user's | re-checks the current password, then resets it |
+| `register(input:)` | none | creates an enabled Keycloak user, email as username, password permanent |
+| `updateIdentity(input:)` | user's | first/last name, email — a new email resets `emailVerified` |
+| `changePassword(input:)` | user's | re-checks the current password, then resets it |
 
 Three rules hold this together, and breaking any of them turns a profile service into a user-administration API:
 
@@ -110,7 +122,7 @@ The local Keycloak realm (`bagbuddy` realm; `bagbuddy-web` is public with the **
 
 ### Payments
 
-`stripeservice` wraps the Stripe Java SDK. `POST /stripe/create-payment-intent` takes a `transactionId`, not an amount: it reads the transaction with the caller's own token (so transactionservice enforces the participant check), verifies the caller is the buyer, and derives the charge from the stored `total`. Metadata is built server-side. `POST /stripe/webhook` is the only path that marks a transaction paid, authenticated by `Webhook.constructEvent` against `STRIPE_WEBHOOK_SECRET` rather than a bearer token. It's commented out in `docker-compose.dev.yml` by default since it needs real Stripe test keys (`STRIPE_SECRET_KEY`/`STRIPE_PUBLISHABLE_KEY`/`STRIPE_WEBHOOK_SECRET` in `.env`) to be useful — uncomment its block once you have them.
+`stripeservice` wraps the Stripe Java SDK. The `createPaymentIntent(transactionId:)` mutation takes a transaction id, not an amount — no amount appears anywhere in its schema: it reads the transaction with the caller's own token (so transactionservice enforces the participant check), verifies the caller is the buyer, and derives the charge from the stored `total`. Metadata is built server-side. `POST /stripe/webhook` stays REST and is the only path that marks a transaction paid, authenticated by `Webhook.constructEvent` against `STRIPE_WEBHOOK_SECRET` rather than a bearer token. It's commented out in `docker-compose.dev.yml` by default since it needs real Stripe test keys (`STRIPE_SECRET_KEY`/`STRIPE_PUBLISHABLE_KEY`/`STRIPE_WEBHOOK_SECRET` in `.env`) to be useful — uncomment its block once you have them.
 
 ### Deployment
 

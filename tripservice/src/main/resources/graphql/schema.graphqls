@@ -1,0 +1,99 @@
+# Annonces de voyage. Toute lecture exige un jeton Keycloak valide (SecurityConfig) ;
+# la propriete d'une annonce est verifiee dans TripService, pas ici.
+
+scalar DateTime
+scalar BigDecimal
+scalar Long
+
+type Query {
+    "Toutes les annonces, les plus recentes d'abord."
+    trips: [Trip!]!
+
+    "Annonces encore reservables : capacite restante > 0 et depart dans le futur."
+    activeTrips: [Trip!]!
+
+    inactiveTrips: [Trip!]!
+
+    trip(id: ID!): Trip!
+
+    tripsByUser(userId: String!): [Trip!]!
+
+    """
+    Compte de paiement du voyageur. Lisible uniquement par son proprietaire : le parcours de
+    paiement n'en a plus besoin cote client, stripeservice le resout lui-meme.
+    """
+    payoutAccount(userId: String!): String
+}
+
+type Mutation {
+    createTrip(input: TripInput!): Trip!
+    updateTrip(id: ID!, input: TripInput!): Trip!
+
+    "Vrai si l'annonce a bien ete supprimee. Reserve au proprietaire."
+    deleteTrip(id: ID!): Boolean!
+}
+
+type Trip {
+    id: ID!
+    userId: String
+    userInfo: UserInfoView
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: DateTime
+    arrivalDate: DateTime
+    totalWeightAvailable: BigDecimal
+
+    "Decremente par le service lors d'une reservation, jamais par le client."
+    remainingWeight: BigDecimal
+    pricePerKg: BigDecimal
+
+    "Calcule par TripListener a partir de remainingWeight et departureDate."
+    active: Boolean
+    conditions: String
+    createdAt: DateTime
+
+    "Renseigne uniquement pour le proprietaire de l'annonce."
+    stripeAccountId: String
+}
+
+"""
+Instantane du voyageur tel qu'il est expose. email et phone ne sont renseignes que pour le
+proprietaire de l'annonce : les listes sont lisibles par tout membre authentifie et ne doivent
+pas distribuer le carnet d'adresses.
+"""
+type UserInfoView {
+    sub: String
+    name: String
+    givenName: String
+    familyName: String
+    username: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+    email: String
+    phone: String
+}
+
+input TripInput {
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: DateTime
+    arrivalDate: DateTime
+    totalWeightAvailable: BigDecimal
+    remainingWeight: BigDecimal
+    pricePerKg: BigDecimal
+    conditions: String
+    stripeAccountId: String
+
+    """
+    Champs libres du profil recopies dans l'instantane. L'identite (sub, email, nom) vient du
+    jeton et n'est volontairement pas acceptee ici.
+    """
+    profile: ProfileInput
+}
+
+input ProfileInput {
+    bio: String
+    location: String
+    phone: String
+}
