@@ -48,6 +48,7 @@ services:
       # Substitue dans keycloak/import/bagbuddy-realm.json a l'import du realm :
       # le secret du client de service ne figure plus dans le depot.
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
     ports:
       - "8000:8080"
     volumes:
@@ -73,8 +74,10 @@ services:
       - bagbuddy-network
 
   # --- USER SERVICE ---
-  # Profils applicatifs (bio, localisation, telephone, compte Stripe). L'identite reste
-  # geree par Keycloak : ce service ne detient aucun secret d'administration.
+  # Profils applicatifs (bio, localisation, telephone, compte Stripe) et cycle de vie des
+  # comptes : le front sert ses propres ecrans d'inscription et de compte, donc ce service
+  # relaie les operations que le navigateur ne peut pas porter (creation d'utilisateur,
+  # changement d'email, mot de passe) vers l'API d'administration de Keycloak.
   user-service:
     build:
       context: ./userservice
@@ -88,6 +91,12 @@ services:
       - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
       - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
       - JWT_AUDIENCE=bagbuddy-api
+      - KEYCLOAK_BASE_URL=http://keycloak:8080
+      - KEYCLOAK_REALM=bagbuddy
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_ACCOUNTS_CLIENT_ID=bagbuddy-accounts
+      - KEYCLOAK_ACCOUNTS_CLIENT_SECRET=${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      - KEYCLOAK_LOGIN_CLIENT_ID=bagbuddy-web
     ports:
       - "8086:8086"
     depends_on:

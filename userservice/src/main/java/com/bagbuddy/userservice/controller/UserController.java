@@ -10,8 +10,11 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 /**
- * Profiles only. There is deliberately no endpoint to list every user, create an account or
- * set a password: account lifecycle belongs to Keycloak.
+ * Application profiles: the fields Keycloak does not carry (bio, location, phone, payout
+ * account). There is deliberately no endpoint to list every user.
+ *
+ * Identity itself — name, email, password — is Keycloak's, and is edited through
+ * {@link AccountController}, which proxies the admin API on behalf of the caller.
  */
 @RestController
 @RequestMapping("/users")

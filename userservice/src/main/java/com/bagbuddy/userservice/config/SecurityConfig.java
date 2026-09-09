@@ -3,6 +3,8 @@ package com.bagbuddy.userservice.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import jakarta.servlet.DispatcherType;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -18,7 +20,10 @@ import org.springframework.security.web.SecurityFilterChain;
 import java.util.List;
 
 /**
- * Every endpoint requires a valid Keycloak access token. The JWKS endpoint is configured
+ * Every endpoint requires a valid Keycloak access token, except POST /users/register: the
+ * account it creates is precisely what the caller does not have a token for yet.
+ *
+ * The JWKS endpoint is configured
  * separately from the issuers on purpose: inside Docker the services reach Keycloak on
  * http://keycloak:8080 while the token the browser obtained carries the public issuer
  * (http://localhost:8000/realms/bagbuddy). Using jwk-set-uri also keeps decoder creation
@@ -45,7 +50,14 @@ public class SecurityConfig {
                 .cors(cors -> cors.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        // Sans ca, une erreur de validation (400) repart en 401 : le
+                        // forward vers /error repasse par la chaine de securite, qui ne
+                        // voit plus de jeton sur la requete interne.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers("/actuator/health/**").permitAll()
+                        // Sign-up is the one endpoint that cannot require a token: the
+                        // account it creates is what the caller is about to sign in with.
+                        .requestMatchers(HttpMethod.POST, "/users/register").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(jwtAuthenticationConverter())));

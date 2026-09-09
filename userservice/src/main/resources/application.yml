@@ -19,14 +19,39 @@ server:
   port: ${PORT:8086}
 
 # --- Authentification (Keycloak) ---
-# Ce service ne parle plus a l'API d'administration de Keycloak : il ne detient aucun
-# secret, il se contente de valider le jeton de l'appelant et de porter le profil applicatif.
 bagbuddy:
   auth:
     # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
     issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
     jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
     audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+  # --- API d'administration de Keycloak ---
+  # Le front sert ses propres ecrans d'inscription et de compte : creer un utilisateur,
+  # changer un email ou poser un mot de passe sont des operations d'administration, qu'un
+  # navigateur ne peut pas porter. Elles passent donc par ce service, avec le client de
+  # service `bagbuddy-accounts` — distinct de `bagbuddy` pour que le droit manage-users ne
+  # soit pas donne au client de tarification.
+  keycloak:
+    base-url: ${KEYCLOAK_BASE_URL:http://localhost:8000}
+    realm: ${KEYCLOAK_REALM:bagbuddy}
+    # Client public utilise pour verifier le mot de passe actuel (grant password) : la
+    # protection anti-force-brute du realm voit ainsi la tentative.
+    login-client-id: ${KEYCLOAK_LOGIN_CLIENT_ID:bagbuddy-web}
+
+  service-client:
+    registration-id: bagbuddy-accounts
+
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-accounts:
+      provider: keycloak
+      client-id: ${KEYCLOAK_ACCOUNTS_CLIENT_ID:bagbuddy-accounts}
+      client-secret: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
 
 logging:
   level:
