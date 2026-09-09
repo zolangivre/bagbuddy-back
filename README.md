@@ -23,15 +23,18 @@ Remplis `.env` avec les mots de passe locaux de ton choix (ils n'existent que
 dans tes conteneurs Postgres/Keycloak locaux, rien n'est envoyé à l'extérieur —
 voir les commentaires de `.env.example` pour le rôle de chaque valeur).
 
-Une valeur mérite une attention particulière : `KEYCLOAK_SERVICE_CLIENT_SECRET`.
-C'est le secret du client confidentiel `bagbuddy`, utilisé pour les appels
-machine-à-machine (tarification d'une réservation, confirmation d'un paiement).
-Il est injecté dans Keycloak à l'import du realm, donc il ne figure nulle part
-dans le dépôt. Génère-le une fois :
+Deux valeurs méritent une attention particulière, les secrets des clients
+confidentiels Keycloak. Ils sont injectés dans Keycloak à l'import du realm,
+donc ils ne figurent nulle part dans le dépôt — génère-les une fois chacun avec
+`openssl rand -base64 32` :
 
-```bash
-openssl rand -base64 32
-```
+- `KEYCLOAK_SERVICE_CLIENT_SECRET` — client `bagbuddy`, appels
+  machine-à-machine (tarification d'une réservation, confirmation d'un
+  paiement) ;
+- `KEYCLOAK_ACCOUNTS_CLIENT_SECRET` — client `bagbuddy-accounts`, utilisé par
+  `userservice` pour l'API d'administration de Keycloak (inscription,
+  changement d'email, mot de passe). Secret distinct : ces droits ne doivent
+  pas être portés par le client de tarification.
 
 ## Tout lancer
 
@@ -100,12 +103,24 @@ dont la signature est vérifiée (`STRIPE_WEBHOOK_SECRET`).
 
 ## Front web
 
-Le client Keycloak `bagbuddy-web` est un client public en PKCE configuré pour
-`http://localhost:4200` (redirect URIs, web origins, post-logout). La gateway
-autorise le CORS depuis `CORS_ALLOWED_ORIGINS` (`http://localhost:4200` par
-défaut, plusieurs origines possibles séparées par des virgules). Si tu sers le
-front sur un autre port ou domaine, mets à jour les deux :
-`CORS_ALLOWED_ORIGINS` dans `.env` et le client `bagbuddy-web` dans le realm.
+Le front web ne renvoie pas vers les pages de Keycloak : il a ses propres
+écrans de connexion, d'inscription et de compte. Le client `bagbuddy-web` est
+donc un client public avec le **grant `password`** (direct access grant) activé
+et le flux redirection désactivé, et c'est `userservice` qui relaie vers l'API
+d'administration ce qu'un navigateur ne peut pas porter :
+
+| Appel | Jeton | Effet |
+| --- | --- | --- |
+| `POST /users/register` | aucun | crée le compte Keycloak (email = identifiant) |
+| `PUT /users/me/identity` | utilisateur | prénom, nom, email |
+| `PUT /users/me/password` | utilisateur | vérifie l'actuel, puis le remplace |
+
+Deux réglages d'origine à tenir alignés si tu sers le front ailleurs que sur
+`http://localhost:4200` : les **web origins** du client `bagbuddy-web` dans le
+realm (sans elles, Keycloak refuse les appels token / userinfo / logout du
+front, qui sont de simples `fetch` cross-origin) et `CORS_ALLOWED_ORIGINS` dans
+`.env` pour la gateway (plusieurs origines possibles, séparées par des
+virgules).
 
 ## Commandes du quotidien
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Spring Boot microservices backend for BagBuddy. This repo is backend-only: the web front (Angular) lives in a separate repo, `bagbuddy-front`, and the historical Expo mobile app in the `BagBuddy` monorepo. Nothing here imports front code, and no path in this repo resolves into a front repo. Each service is an independent Maven project (Java 17, Spring Boot 3.5.6, own Postgres database) under its own directory: `eurekaserver`, `apigateway`, `tripservice`, `transactionservice`, `reviewservice`, `stripeservice`, `userservice`. Keycloak is the identity provider; every service validates the resulting JWT itself as an OAuth2 resource server (see Auth).
+Spring Boot microservices backend for BagBuddy. This repo is backend-only: the web front (Angular) lives in a separate repo, `bagbuddy-front`, and the historical Expo mobile app in the `BagBuddy` monorepo. Nothing here imports front code, and no path in this repo resolves into a front repo. Each service is an independent Maven project (Java 21, Spring Boot 3.5.6, own Postgres database) under its own directory: `eurekaserver`, `apigateway`, `tripservice`, `transactionservice`, `reviewservice`, `stripeservice`, `userservice`. Keycloak is the identity provider; every service validates the resulting JWT itself as an OAuth2 resource server (see Auth).
 
 ## Commands
 
@@ -68,7 +68,7 @@ Money is never client-supplied. `TransactionService.create()` fetches the listin
 
 ### Auth
 
-Every service is an OAuth2 **resource server**: `spring-boot-starter-oauth2-resource-server` plus a `config/SecurityConfig.java` that requires a valid Keycloak access token on every request (`anyRequest().authenticated()`), with only `/actuator/health/**` and the Stripe webhook left open. Anonymous calls get 401. The front authenticates against Keycloak directly (OIDC/PKCE) and calls the gateway with the bearer token.
+Every service is an OAuth2 **resource server**: `spring-boot-starter-oauth2-resource-server` plus a `config/SecurityConfig.java` that requires a valid Keycloak access token on every request (`anyRequest().authenticated()`), with only `/actuator/health/**` and the Stripe webhook left open. Anonymous calls get 401, with one exception: `POST /users/register` on userservice, which is what a caller uses precisely because it has no token yet. The web front authenticates against Keycloak directly (direct access grant from its own sign-in form) and calls the gateway with the bearer token; the Expo app still uses OIDC/PKCE.
 
 Three deliberate configuration choices in `SecurityConfig`:
 
@@ -88,9 +88,25 @@ Two endpoints are unreachable with a user token and require the `service` realm 
 
 The `bagbuddy` client secret comes from `KEYCLOAK_SERVICE_CLIENT_SECRET` — injected into Keycloak at realm import via `${KEYCLOAK_SERVICE_CLIENT_SECRET}` in `bagbuddy-realm.json`, and read by transactionservice/stripeservice for their client-credentials grant. It is never committed. That service account holds only the `service` realm role; it deliberately does **not** have `realm-management`/`realm-admin`.
 
-`userservice` owns application-side profiles (bio, location, phone, Stripe account) keyed by the Keycloak `sub`, and mirrors identity claims from the token on each `/users/me` call. It has no Keycloak admin client and no account-lifecycle endpoints: creating accounts, passwords, and email verification stay in Keycloak. `GET /users/{sub}` returns a `PublicUserProfile` with no email, phone or payout account.
+`userservice` owns application-side profiles (bio, location, phone, Stripe account) keyed by the Keycloak `sub`, and mirrors identity claims from the token on each `/users/me` call. `GET /users/{sub}` returns a `PublicUserProfile` with no email, phone or payout account.
 
-The local Keycloak realm (`bagbuddy` realm, two public PKCE clients — `bagbuddy-web` for the Angular front on `http://localhost:4200`, `bagbuddy-mobile` for the Expo app — plus a seeded `testuser`/`Test1234!` account) auto-imports from `keycloak/import/bagbuddy-realm.json` on every `docker compose up` — see [README.md](README.md). Changing the front's origin/port means updating both `bagbuddy-web`'s redirect URIs/web origins here and `CORS_ALLOWED_ORIGINS`. That file is the source of truth for local Keycloak config; edit it (or re-export after changing the realm via the admin console) rather than reconfiguring Keycloak by hand each time. Keep redirect URIs and web origins exact — no `*` wildcards on a public client, which would let an attacker have the authorization code delivered to a host they control.
+It also carries the **account lifecycle** (`controller/AccountController.java`), because the web front serves its own sign-up and account screens instead of Keycloak's pages. Creating a user, changing an email and setting a password are admin operations that a browser can never hold the credentials for, so they are proxied here:
+
+| Endpoint | Token | What it does |
+| --- | --- | --- |
+| `POST /users/register` | none | creates an enabled Keycloak user, email as username, password permanent |
+| `PUT /users/me/identity` | user's | first/last name, email — a new email resets `emailVerified` |
+| `PUT /users/me/password` | user's | re-checks the current password, then resets it |
+
+Three rules hold this together, and breaking any of them turns a profile service into a user-administration API:
+
+- **Every operation acts on `jwt.getSubject()`.** No method here takes a user id: a caller can only ever edit its own account.
+- **The admin credentials are a separate client.** `bagbuddy-accounts` (secret `KEYCLOAK_ACCOUNTS_CLIENT_SECRET`) holds `realm-management`'s `manage-users`/`view-users`; the `bagbuddy` pricing client deliberately still holds none of that. Two secrets, two blast radii.
+- **The current password is verified by asking Keycloak for a token with it** (`passwordMatches`), not by any admin endpoint — that way the realm's brute force protection counts the attempt.
+
+`SecurityConfig` also permits the `ERROR` dispatch. Without it a validation failure (400) is re-filtered on the internal forward to `/error`, arrives without a bearer token, and reaches the client as a puzzling 401. The other services still have this latent bug.
+
+The local Keycloak realm (`bagbuddy` realm; `bagbuddy-web` is public with the **direct access grant** enabled and the redirect flow off, since the Angular front never leaves the site to sign in; `bagbuddy-mobile` stays a public PKCE client for the Expo app; `bagbuddy-accounts` is the confidential client behind the account endpoints above; plus a seeded `testuser`/`Test1234!` account and a `length(8)` password policy) auto-imports from `keycloak/import/bagbuddy-realm.json` on every `docker compose up` — see [README.md](README.md). Changing the front's origin/port means updating both `bagbuddy-web`'s web origins here and `CORS_ALLOWED_ORIGINS` — the web origins are what makes Keycloak answer the front's token, userinfo and logout calls at all, since they are now plain cross-origin fetches rather than redirects. That file is the source of truth for local Keycloak config; edit it (or re-export after changing the realm via the admin console) rather than reconfiguring Keycloak by hand each time. Note that the import only runs when the realm does not exist yet: on a stack that already has one, the same change has to be applied through the admin API as well, and a `PUT` of a client fetched from `/clients?clientId=` will silently drop its protocol mappers (that is how the `bagbuddy-api-audience` mapper gets lost, and every token then fails the audience check). Keep redirect URIs and web origins exact — no `*` wildcards on a public client, which would let an attacker have the authorization code delivered to a host they control.
 
 ### Payments
 
