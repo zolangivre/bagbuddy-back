@@ -7,23 +7,29 @@ server:
 
 eureka:
   client:
+    # Serveur autonome : il ne s'enregistre pas aupres de lui-meme et ne va
+    # chercher aucun registre ailleurs. Ce n'est pas un oubli, c'est la config
+    # normale d'un Eureka standalone -- ne pas passer ces deux-la a true en
+    # croyant "activer" quelque chose.
     register-with-eureka: false
     fetch-registry: false
-    service-url:
-      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+
+  instance:
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+
   server:
+    # Reglages taille dev : on veut voir un service apparaitre et disparaitre
+    # tout de suite apres un docker compose up/restart, pas au bout d'une minute
+    # et demie. En production, remettre l'auto-preservation et des intervalles
+    # plus larges -- ces valeurs generent beaucoup de trafic de controle.
     wait-time-in-ms-when-sync-empty: 0
     response-cache-update-interval-ms: 5000
     enable-self-preservation: false
     eviction-interval-timer-in-ms: 10000
-  instance:
-    hostname: eurekaserver-app-dd87242b5252.herokuapp.com
-    prefer-ip-address: false
-    non-secure-port: 80
-    non-secure-port-enabled: true
-    secure-port-enabled: false
 
 logging:
   level:
-    "[com.netflix.eureka]": OFF
-    "[com.netflix.discovery]": OFF
+    # Volontairement pas a OFF : c'est ici qu'on lit "Registered instance
+    # TRIP-SERVICE/..." quand on cherche pourquoi un service n'apparait pas.
+    "[com.netflix.eureka]": INFO
+    "[com.netflix.discovery]": WARN

@@ -24,7 +24,7 @@ cd tripservice        # or transactionservice / reviewservice / stripeservice / 
 ./mvnw test
 ./mvnw clean package
 ```
-Running a service this way still needs its Postgres DB and `DATABASE_URL`/`PORT` env vars — either keep the rest of the stack up via docker-compose and only rebuild+restart the one service you're iterating on, or export the same env vars docker-compose would (see the service's block in `docker-compose.dev.yml`).
+Running a service this way still needs its Postgres DB and `DATABASE_URL`/`PORT` env vars (it will also look for a registry on `http://localhost:8761/eureka/` and merely log a warning if none answers — registration failing does not stop a service from booting or serving) — either keep the rest of the stack up via docker-compose and only rebuild+restart the one service you're iterating on, or export the same env vars docker-compose would (see the service's block in `docker-compose.dev.yml`).
 
 `docker-compose.yml` (no `.dev` suffix) exists alongside `docker-compose.dev.yml` but is not the one used for local dev — check it before assuming it's current if you need it.
 
@@ -38,27 +38,40 @@ Each service also carries, in `src/main/resources/graphql/schema.graphqls`, the 
 
 `config/GraphQlScalarConfig.java` (duplicated per service, like the other config classes) registers the three scalars GraphQL lacks: `DateTime` (ISO-8601 local, the format Jackson already produced), `BigDecimal` (money and weights, in exact decimal — a `Float` would lose precision) and `Long`. `web/GraphQlExceptionResolver.java` replaces the REST `@RestControllerAdvice` for GraphQL: it maps `AccessDeniedException` → `FORBIDDEN`/`UNAUTHORIZED`, `NoSuchElementException` → `NOT_FOUND`, `IllegalArgumentException`/`ConstraintViolationException` → `BAD_REQUEST`, and leaves everything else as a generic `INTERNAL_ERROR` so nothing internal leaks. In GraphQL the transport stays `200`: the meaning is in `errors[].extensions.classification`, which is what tests assert on.
 
-### Routing: static URLs, not service discovery
+### Routing: Eureka service discovery
 
-`eurekaserver` runs but is effectively inert — its `application.yaml` sets `register-with-eureka: false` and `fetch-registry: false`, and each downstream service's own Eureka client config is commented out (leftover from an earlier Heroku-hosted setup, see the dead `*.herokuapp.com` hostnames in `eurekaserver`/`*service` `application.yml` files). Actual routing goes through `apigateway`'s Spring Cloud Gateway config (`apigateway/src/main/resources/application.yaml`), which maps path prefixes to **literal** service URLs read from env vars:
+`eurekaserver` is a real, working registry: the five business services **and** the gateway register with it, and `apigateway` resolves its routes through it. Routing goes through `apigateway`'s Spring Cloud Gateway config (`apigateway/src/main/resources/application.yaml`), which maps path prefixes to `lb://` targets named after each service's `spring.application.name`:
 
 ```
-/trips/**        -> ${TRIP_SERVICE_URL}
-/transactions/** -> ${TRANSACTION_SERVICE_URL}
-/reviews/**      -> ${REVIEW_SERVICE_URL}
-/stripe/**       -> ${STRIPE_SERVICE_URL}
-/users/**        -> ${USER_SERVICE_URL}
+/trips/**        -> lb://trip-service
+/transactions/** -> lb://transaction-service
+/reviews/**      -> lb://review-service
+/stripe/**       -> lb://stripe-service
+/users/**        -> lb://user-service
 ```
+
+The gateway therefore holds no service URL at all. Two consequences worth knowing before debugging a routing problem:
+
+- **A service that is not registered gives a 503, not a connection refusal.** `stripe-service` is commented out in `docker-compose.dev.yml`, so `/stripe/**` answers 503 by default — that is expected, not a bug.
+- **Registration is not instantaneous.** Client and server timings are deliberately tuned down for dev (`lease-renewal-interval-in-seconds: 5`, `registry-fetch-interval-seconds: 5`, server eviction every 10s, self-preservation off), which brings a restarted service back into rotation in about 4 seconds instead of the 30–90 the Eureka defaults would cost. These values are dev settings: they generate a lot of control traffic and turn off the safety net that keeps a registry stable during a network blip. Re-enable self-preservation and widen the intervals before running this anywhere real.
+
+One easily-missed knob lives on the gateway rather than on Eureka: `spring.cloud.loadbalancer.cache.ttl` is 35 seconds by default, which would have silently cancelled out the tuning above. It is set to `5s`.
+
+`register-with-eureka: false` / `fetch-registry: false` on `eurekaserver` itself is **not** a mistake to fix — that is the normal configuration of a standalone registry, which must not try to register with itself.
 
 A single `/graphql` endpoint per service would have broken this path-prefix routing, so each service sets `spring.graphql.http.path` to its own prefix (`/trips/graphql`, …) instead of the default `/graphql`. The gateway therefore needed no rewrite filter, and hitting a container directly uses the exact same URL. `spring.graphql.graphiql` follows the same convention (`/trips/graphiql`, …) and is off unless `GRAPHIQL_ENABLED=true` — `docker-compose.dev.yml` sets it. Don't add a new service without giving it this prefixed path, or its schema will answer on `/graphql` and be unroutable.
 
-Those env vars are set on the `api-gateway` container in `docker-compose.dev.yml` to the other containers' docker-compose service names (e.g. `http://trip-service:8082`). `userservice` is now part of the routed stack (`/users/**` -> `http://user-service:8086`) and enabled in `docker-compose.dev.yml`.
+Every service reaches the registry through `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE`, set to `http://eureka-server:8761/eureka/` on each container in `docker-compose.dev.yml` and defaulting to `http://localhost:8761/eureka/` outside Docker. Instances register by IP (`eureka.instance.prefer-ip-address: true`) because a container hostname only resolves inside the compose network, while its IP always does.
+
+The three service-to-service calls deliberately **do not** go through discovery: `transactionservice` → `tripservice` and `stripeservice` → `transactionservice` keep their literal `TRIP_SERVICE_URL` / `TRANSACTION_SERVICE_URL` env vars. They are few, fixed, and sit on the pricing and payment path, where a registry gap would turn into a failed booking. Discovery earns its place at the gateway, which would otherwise have to know every service URL.
+
+Tests set `eureka.client.enabled=false` in each service's `src/test/resources/application.properties`: a context-load test must not require a registry to be up.
 
 The gateway does **not** validate tokens — it only routes. Each downstream service validates the bearer token itself (see Auth), so hitting a service directly on its published port is no weaker than going through the gateway.
 
 The gateway also declares a global CORS config (`spring.cloud.gateway.globalcors`) allowing `${CORS_ALLOWED_ORIGINS}` (default `http://localhost:4200`, comma-separated for several origins) — required now that a browser front calls the gateway, unlike the native mobile app which needed none.
 
-Most services hardcode their `server.port` default to `8082` in `application.yml` regardless of which service it is (`userservice` defaults to `8086`) — this only works in Docker because `docker-compose.dev.yml` overrides it per-container with an explicit `PORT` env var. Don't remove those `PORT` overrides or add a new service without one, along with its `JWT_ISSUER_URIS` / `JWT_JWK_SET_URI` / `JWT_AUDIENCE`.
+Most services hardcode their `server.port` default to `8082` in `application.yml` regardless of which service it is (`userservice` defaults to `8086`) — this only works in Docker because `docker-compose.dev.yml` overrides it per-container with an explicit `PORT` env var. Don't remove those `PORT` overrides or add a new service without one, along with its `JWT_ISSUER_URIS` / `JWT_JWK_SET_URI` / `JWT_AUDIENCE` / `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE`. A new service also needs the `spring-cloud-starter-netflix-eureka-client` dependency, an `eureka:` block copied from any existing service, `eureka.client.enabled=false` in its test properties, its prefixed `spring.graphql.http.path`, and an `lb://<spring.application.name>` route on the gateway.
 
 ### Data model: front-owned state machine, denormalized user/listing info
 

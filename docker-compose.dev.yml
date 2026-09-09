@@ -23,11 +23,6 @@ services:
     restart: always
     environment:
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
-      - TRIP_SERVICE_URL=http://trip-service:8082
-      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
-      - REVIEW_SERVICE_URL=http://review-service:8084
-      - STRIPE_SERVICE_URL=http://stripe-service:8085
-      - USER_SERVICE_URL=http://user-service:8086
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:4200}
     networks:
       - bagbuddy-network
@@ -93,6 +88,7 @@ services:
       - JWT_AUDIENCE=bagbuddy-api
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - KEYCLOAK_BASE_URL=http://keycloak:8080
       - KEYCLOAK_REALM=bagbuddy
       - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
@@ -137,6 +133,7 @@ services:
       - JWT_AUDIENCE=bagbuddy-api
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
     ports:
       - "8082:8082"
     depends_on:
@@ -176,6 +173,7 @@ services:
       - JWT_AUDIENCE=bagbuddy-api
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
@@ -222,6 +220,7 @@ services:
       - JWT_AUDIENCE=bagbuddy-api
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - TRANSACTION_SERVICE_URL=http://transaction-service:8083
     ports:
       - "8084:8084"
@@ -267,6 +266,7 @@ services:
   #     JWT_JWK_SET_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
   #     JWT_AUDIENCE: bagbuddy-api
   #     GRAPHIQL_ENABLED: "true"
+  #     EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
   #     KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
   #     KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
   #     KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}

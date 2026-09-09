@@ -3,6 +3,12 @@ spring:
     name: api-gateway
 
   cloud:
+    loadbalancer:
+      cache:
+        # Sans cela le gateway garde sa vue des instances 35 secondes, ce qui
+        # annulerait en pratique la cadence reglee cote Eureka.
+        ttl: 5s
+
     gateway:
       # Chaque service expose son propre schema GraphQL sous son prefixe
       # (/trips/graphql, /transactions/graphql, ...). Les routes restent donc de
@@ -12,29 +18,35 @@ spring:
       #
       # Restent en REST derriere ces memes routes : les endpoints /internal
       # service-a-service et le webhook Stripe, que GraphQL ne sert pas.
+      #
+      # Les cibles sont des lb://<spring.application.name> resolus par Eureka :
+      # le gateway ne connait plus aucune URL de service. Consequence a
+      # connaitre -- un service non enregistre donne un 503 et non un refus de
+      # connexion, et il faut quelques secondes apres son demarrage pour qu'il
+      # apparaisse dans le registre.
       routes:
         - id: trip-service
-          uri: ${TRIP_SERVICE_URL}
+          uri: lb://trip-service
           predicates:
             - Path=/trips/**
 
         - id: transaction-service
-          uri: ${TRANSACTION_SERVICE_URL}
+          uri: lb://transaction-service
           predicates:
             - Path=/transactions/**
 
         - id: review-service
-          uri: ${REVIEW_SERVICE_URL}
+          uri: lb://review-service
           predicates:
             - Path=/reviews/**
 
         - id: stripe-service
-          uri: ${STRIPE_SERVICE_URL}
+          uri: lb://stripe-service
           predicates:
             - Path=/stripe/**
 
         - id: user-service
-          uri: ${USER_SERVICE_URL}
+          uri: lb://user-service
           predicates:
             - Path=/users/**
 
@@ -52,6 +64,19 @@ spring:
         response-timeout: 20000
         pool:
           max-connections: 50
+
+# --- Service discovery (Eureka) ---
+# Le gateway est client du registre : il s'y enregistre (pratique pour le voir
+# dans le dashboard) et surtout il le lit pour resoudre les lb:// ci-dessus.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka/}
+    registry-fetch-interval-seconds: 5
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
 
 server:
   port: ${PORT:8080}

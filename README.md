@@ -75,6 +75,32 @@ faut de vraies clés de test `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` /
 `STRIPE_WEBHOOK_SECRET` dans `.env` pour servir à quelque chose. Décommente son
 bloc une fois que tu les as.
 
+## Service discovery
+
+Les services s'enregistrent aupres d'Eureka au demarrage, et l'`apigateway`
+resout ses routes a travers le registre : il ne connait aucune URL de service,
+seulement des `lb://trip-service`, `lb://user-service`, etc. Le dashboard
+`http://localhost:8761` liste ce qui est reellement enregistre — c'est le
+premier endroit ou regarder quand une route repond mal.
+
+Deux comportements a connaitre :
+
+- **Un service non enregistre renvoie `503`**, et non un refus de connexion.
+  `stripe-service` etant commente dans `docker-compose.dev.yml`, `/stripe/**`
+  repond 503 par defaut : c'est normal.
+- **L'enregistrement n'est pas instantane.** Les cadences sont volontairement
+  serrees en dev (renouvellement et rafraichissement toutes les 5 s, eviction
+  toutes les 10 s, auto-preservation coupee, cache du load-balancer a 5 s) : un
+  service redemarre redevient routable en ~4 s, la ou les valeurs par defaut
+  d'Eureka demanderaient 30 a 90 s. Ce sont des reglages de developpement — ils
+  generent beaucoup de trafic de controle et desactivent le filet de securite
+  qui protege le registre d'une micro-coupure reseau. A elargir avant toute
+  mise en production.
+
+Les trois appels service-a-service (`transactionservice` -> `tripservice`,
+`stripeservice` -> `transactionservice`) restent volontairement sur des URLs
+statiques : ils sont peu nombreux, figes, et sur le chemin du paiement.
+
 ## API GraphQL
 
 Un schéma par service, servi sous le préfixe du service : la gateway route par
@@ -231,4 +257,13 @@ champs qu'un client ne doit pas pouvoir écrire (`userId`, `total`, `sellerId`�
 
 N'oublie pas d'ajouter un Dockerfile et le bloc de service correspondant dans
 `docker-compose.dev.yml` quand tu en crées un — avec ses variables `PORT`,
-`JWT_ISSUER_URIS`, `JWT_JWK_SET_URI` et `JWT_AUDIENCE`.
+`JWT_ISSUER_URIS`, `JWT_JWK_SET_URI`, `JWT_AUDIENCE` et
+`EUREKA_CLIENT_SERVICEURL_DEFAULTZONE`.
+
+Côté service, il lui faut aussi la dépendance
+`spring-cloud-starter-netflix-eureka-client`, le bloc `eureka:` de son
+`application.yml` (recopiable depuis n'importe quel service existant),
+`eureka.client.enabled=false` dans ses propriétés de test, et son chemin GraphQL
+préfixé (`spring.graphql.http.path`). Enfin, ajoute sa route `lb://<nom>` dans
+`apigateway/src/main/resources/application.yaml`, où `<nom>` est son
+`spring.application.name`.
