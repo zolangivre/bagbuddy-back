@@ -1,0 +1,26 @@
+# Reverse proxy de production : HTTPS automatique (Let's Encrypt) sur les deux noms.
+# Caddy ecrase le X-Forwarded-For recu du client (aucun proxy de confiance declare),
+# c'est donc une valeur fiable pour le rate limiting de la gateway.
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# Endpoints service-a-service : ils exigent deja le role 'service', mais les services
+	# s'appellent directement sur le reseau Docker et n'ont aucune raison de passer ici.
+	@internal path /trips/internal/* /transactions/internal/*
+	respond @internal 404
+
+	# /stripe/webhook passe par la gateway comme le reste : c'est l'URL a declarer chez Stripe.
+	reverse_proxy api-gateway:8080
+}
+
+{$AUTH_DOMAIN} {
+	encode zstd gzip
+
+	# Console d'administration fermee au public : on y accede par tunnel SSH
+	# (voir README, section Production).
+	@admin path /admin /admin/*
+	respond @admin 404
+
+	reverse_proxy keycloak:8080
+}

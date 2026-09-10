@@ -1,0 +1,340 @@
+# Production : une seule machine (VM Oracle Cloud Always Free, 2 OCPU ARM / 12 Go),
+# tout le backend derriere Caddy. Voir la section "Production" du README.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Differences volontaires avec docker-compose.dev.yml :
+# - seul Caddy publie des ports (80/443). La gateway n'est joignable qu'a travers lui,
+#   ce qui rend X-Forwarded-For fiable pour le rate limiting de /users/** ;
+# - une seule instance Postgres pour les cinq bases (moins de RAM, une seule sauvegarde) ;
+# - Keycloak en mode production, sans les comptes de demo ni les donnees de seed/ ;
+# - pas de Zipkin ni de GraphiQL, memoire de chaque JVM plafonnee.
+
+x-java-service: &java-service
+  restart: unless-stopped
+  mem_limit: 640m
+  networks:
+    - bagbuddy
+
+# Variables communes aux services metier. Les ancres YAML ne fusionnent pas les listes,
+# d'ou la forme dictionnaire des blocs environment.
+x-java-env: &java-env
+  # Heap a 65 % du plafond du conteneur : le reste va au metaspace, aux threads et au
+  # code compile. Au-dela, le noyau tue la JVM sans message cote Java.
+  JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+  EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+  # Cadences elargies par rapport au dev (5 s) sans revenir aux 30/90 s par defaut.
+  EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "10"
+  EUREKA_INSTANCE_LEASERENEWALINTERVALINSECONDS: "10"
+  EUREKA_INSTANCE_LEASEEXPIRATIONDURATIONINSECONDS: "30"
+  MANAGEMENT_TRACING_ENABLED: "false"
+  JWT_ISSUER_URIS: https://${AUTH_DOMAIN:?AUTH_DOMAIN manquant}/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+  JWT_JWK_SET_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+  JWT_AUDIENCE: bagbuddy-api
+  KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+
+services:
+  # --- REVERSE PROXY ---
+  # Certificats Let's Encrypt obtenus et renouveles automatiquement pour API_DOMAIN et
+  # AUTH_DOMAIN : les deux noms doivent deja pointer sur l'IP de la machine, et les ports
+  # 80/443 etre ouverts, sinon le challenge ACME echoue.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 128m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN manquant}
+      AUTH_DOMAIN: ${AUTH_DOMAIN:?AUTH_DOMAIN manquant}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api-gateway
+      - keycloak
+    networks:
+      - bagbuddy
+
+  # --- BASE DE DONNEES ---
+  # Une instance, six bases (keycloak + une par service), chacune avec son propre
+  # utilisateur. deploy/postgres/init-databases.sh ne tourne qu'a la creation du volume.
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant}
+      KEYCLOAK_DB: ${KEYCLOAK_DB:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD manquant}
+      TRIP_SERVICE_DB: ${TRIP_SERVICE_DB:-tripservice}
+      TRIP_SERVICE_USER: ${TRIP_SERVICE_USER:-tripservice}
+      TRIP_SERVICE_PASSWORD: ${TRIP_SERVICE_PASSWORD:?TRIP_SERVICE_PASSWORD manquant}
+      TRANSACTION_SERVICE_DB: ${TRANSACTION_SERVICE_DB:-transactionservice}
+      TRANSACTION_SERVICE_USER: ${TRANSACTION_SERVICE_USER:-transactionservice}
+      TRANSACTION_SERVICE_PASSWORD: ${TRANSACTION_SERVICE_PASSWORD:?TRANSACTION_SERVICE_PASSWORD manquant}
+      REVIEW_SERVICE_DB: ${REVIEW_SERVICE_DB:-reviewservice}
+      REVIEW_SERVICE_USER: ${REVIEW_SERVICE_USER:-reviewservice}
+      REVIEW_SERVICE_PASSWORD: ${REVIEW_SERVICE_PASSWORD:?REVIEW_SERVICE_PASSWORD manquant}
+      USER_SERVICE_DB: ${USER_SERVICE_DB:-userservice}
+      USER_SERVICE_USER: ${USER_SERVICE_USER:-userservice}
+      USER_SERVICE_PASSWORD: ${USER_SERVICE_PASSWORD:?USER_SERVICE_PASSWORD manquant}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - bagbuddy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bagbuddy
+
+  # --- KEYCLOAK ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.0
+    restart: unless-stopped
+    mem_limit: 1g
+    command: start --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: ${KEYCLOAK_DB:-keycloak}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      # URL publique : c'est elle qui figure dans le 'iss' de chaque jeton, y compris ceux
+      # que les services demandent en interne sur http://keycloak:8080.
+      KC_HOSTNAME: https://${AUTH_DOMAIN}
+      # Console d'administration servie uniquement sur ce port local, a travers un tunnel
+      # SSH (voir README) ; Caddy renvoie 404 sur /admin cote public.
+      KC_HOSTNAME_ADMIN: http://localhost:8081
+      # TLS termine par Caddy, qui transmet X-Forwarded-*.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN manquant}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD manquant}
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET:?KEYCLOAK_SERVICE_CLIENT_SECRET manquant}
+      KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET:?KEYCLOAK_ACCOUNTS_CLIENT_SECRET manquant}
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
+    ports:
+      # Loopback uniquement : jamais expose sur Internet.
+      - "127.0.0.1:8081:8080"
+    volumes:
+      # Le realm seul : les comptes de demo de seed/keycloak ne sont jamais montes ici.
+      - ./keycloak/import/bagbuddy-realm.json:/opt/keycloak/data/import/bagbuddy-realm.json:ro
+    healthcheck:
+      # L'image n'a ni curl ni wget : requete HTTP a la main sur le port de management.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bagbuddy
+
+  # --- EUREKA ---
+  eureka-server:
+    <<: *java-service
+    build: ./eurekaserver
+    mem_limit: 450m
+    environment:
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      MANAGEMENT_TRACING_ENABLED: "false"
+      # L'auto-preservation reste coupee meme ici : sur une seule machine il n'y a pas de
+      # coupure reseau dont elle protegerait, et avec six instances le redemarrage d'une
+      # seule suffit a passer sous son seuil de 85 % -- le registre garderait alors
+      # l'ancienne IP du conteneur et la gateway y enverrait des requetes.
+      EUREKA_SERVER_ENABLESELFPRESERVATION: "false"
+      EUREKA_SERVER_EVICTIONINTERVALTIMERINMS: "15000"
+      EUREKA_SERVER_RESPONSECACHEUPDATEINTERVALMS: "10000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8761/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # --- API GATEWAY ---
+  api-gateway:
+    <<: *java-service
+    build: ./apigateway
+    environment:
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "10"
+      EUREKA_INSTANCE_LEASERENEWALINTERVALINSECONDS: "10"
+      EUREKA_INSTANCE_LEASEEXPIRATIONDURATIONINSECONDS: "30"
+      SPRING_CLOUD_LOADBALANCER_CACHE_TTL: 10s
+      MANAGEMENT_TRACING_ENABLED: "false"
+      REDIS_HOST: redis
+      CORS_ALLOWED_ORIGINS: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- SERVICES METIER ---
+  # start_period large : huit JVM qui demarrent ensemble sur deux coeurs ARM mettent
+  # plusieurs minutes, et un healthcheck trop presse ferait echouer les depends_on.
+  user-service:
+    <<: *java-service
+    build: ./userservice
+    environment:
+      <<: *java-env
+      PORT: "8086"
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${USER_SERVICE_DB:-userservice}
+      SPRING_DATASOURCE_USERNAME: ${USER_SERVICE_USER:-userservice}
+      SPRING_DATASOURCE_PASSWORD: ${USER_SERVICE_PASSWORD}
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: bagbuddy
+      KEYCLOAK_ACCOUNTS_CLIENT_ID: bagbuddy-accounts
+      KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      KEYCLOAK_LOGIN_CLIENT_ID: bagbuddy-web
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  trip-service:
+    <<: *java-service
+    build: ./tripservice
+    environment:
+      <<: *java-env
+      PORT: "8082"
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${TRIP_SERVICE_DB:-tripservice}
+      SPRING_DATASOURCE_USERNAME: ${TRIP_SERVICE_USER:-tripservice}
+      SPRING_DATASOURCE_PASSWORD: ${TRIP_SERVICE_PASSWORD}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  transaction-service:
+    <<: *java-service
+    build: ./transactionservice
+    environment:
+      <<: *java-env
+      PORT: "8083"
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${TRANSACTION_SERVICE_DB:-transactionservice}
+      SPRING_DATASOURCE_USERNAME: ${TRANSACTION_SERVICE_USER:-transactionservice}
+      SPRING_DATASOURCE_PASSWORD: ${TRANSACTION_SERVICE_PASSWORD}
+      KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      TRIP_SERVICE_URL: http://trip-service:8082
+      # PAYMENTS_REQUIRE_STRIPE n'est volontairement pas defini : il vaut true, et un
+      # paiement n'est confirme que par le webhook Stripe signe.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  review-service:
+    <<: *java-service
+    build: ./reviewservice
+    environment:
+      <<: *java-env
+      PORT: "8084"
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${REVIEW_SERVICE_DB:-reviewservice}
+      SPRING_DATASOURCE_USERNAME: ${REVIEW_SERVICE_USER:-reviewservice}
+      SPRING_DATASOURCE_PASSWORD: ${REVIEW_SERVICE_PASSWORD}
+      TRANSACTION_SERVICE_URL: http://transaction-service:8083
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+  stripe-service:
+    <<: *java-service
+    build: ./stripeservice
+    environment:
+      <<: *java-env
+      PORT: "8085"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?STRIPE_SECRET_KEY manquant}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?STRIPE_WEBHOOK_SECRET manquant}
+      KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      TRANSACTION_SERVICE_URL: http://transaction-service:8083
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  bagbuddy:

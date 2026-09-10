@@ -506,33 +506,6 @@
       "clientRoles": {},
       "notBefore": 0,
       "groups": []
-    },
-    {
-      "id": "7d4c04f1-cc5b-43ff-a10b-ff627b55f233",
-      "username": "testuser",
-      "firstName": "Test",
-      "lastName": "User",
-      "email": "testuser@bagbuddy.local",
-      "emailVerified": true,
-      "createdTimestamp": 1783956249955,
-      "enabled": true,
-      "totp": false,
-      "credentials": [
-        {
-          "id": "91f690a1-1b12-42f0-ac3c-34028622974e",
-          "type": "password",
-          "createdDate": 1783956249986,
-          "secretData": "{\"value\":\"TafpB+uviQJrJLyP5pQSC+HHY4ghhSzfGLuoKyuqT/Q=\",\"salt\":\"/AqzN29Msz7oAaf7mqvKeQ==\",\"additionalParameters\":{}}",
-          "credentialData": "{\"hashIterations\":5,\"algorithm\":\"argon2\",\"additionalParameters\":{\"hashLength\":[\"32\"],\"memory\":[\"7168\"],\"type\":[\"id\"],\"version\":[\"1.3\"],\"parallelism\":[\"1\"]}}"
-        }
-      ],
-      "disableableCredentialTypes": [],
-      "requiredActions": [],
-      "realmRoles": [
-        "default-roles-bagbuddy"
-      ],
-      "notBefore": 0,
-      "groups": []
     }
   ],
   "scopeMappings": [
@@ -919,10 +892,10 @@
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
-        "http://localhost:4200/*"
+        "${BAGBUDDY_FRONT_URL}/*"
       ],
       "webOrigins": [
-        "http://localhost:4200"
+        "${BAGBUDDY_FRONT_URL}"
       ],
       "notBefore": 0,
       "bearerOnly": false,
@@ -936,7 +909,7 @@
       "protocol": "openid-connect",
       "attributes": {
         "backchannel.logout.session.required": "true",
-        "post.logout.redirect.uris": "http://localhost:4200/*",
+        "post.logout.redirect.uris": "${BAGBUDDY_FRONT_URL}/*",
         "pkce.code.challenge.method": "S256",
         "backchannel.logout.revoke.offline.tokens": "false"
       },
@@ -959,7 +932,7 @@
       ],
       "name": "BagBuddy Web",
       "description": "Client public (PKCE) pour l app web Angular",
-      "rootUrl": "http://localhost:4200",
+      "rootUrl": "${BAGBUDDY_FRONT_URL}",
       "baseUrl": "/",
       "protocolMappers": [
         {

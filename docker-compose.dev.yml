@@ -19,7 +19,7 @@ services:
       - bagbuddy-network
 
   # --- TRACING ---
-  # Collecte les traces des 6 services. Aucune persistance : en memoire, ce qui
+  # Collecte les traces des services. Aucune persistance : en memoire, ce qui
   # convient au dev et perd tout au redemarrage.
   zipkin:
     image: openzipkin/zipkin:3.4
@@ -86,14 +86,20 @@ services:
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-      # Substitue dans keycloak/import/bagbuddy-realm.json a l'import du realm :
-      # le secret du client de service ne figure plus dans le depot.
+      # Substitues dans bagbuddy-realm.json a l'import du realm : les secrets des
+      # clients confidentiels ne figurent pas dans le depot, et l'URL du front est
+      # la seule difference de realm entre le dev et la prod.
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
       KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:-http://localhost:4200}
     ports:
       - "8000:8080"
     volumes:
-      - ./keycloak/import:/opt/keycloak/data/import
+      # Le realm est commun au dev et a la prod ; les comptes de demo, eux, ne sont
+      # montes qu'ici. Keycloak importe bagbuddy-users-*.json juste apres le realm,
+      # et seulement quand le realm n'existe pas encore (base Keycloak neuve).
+      - ./keycloak/import/bagbuddy-realm.json:/opt/keycloak/data/import/bagbuddy-realm.json:ro
+      - ./seed/keycloak/bagbuddy-users-0.json:/opt/keycloak/data/import/bagbuddy-users-0.json:ro
     depends_on:
       - keycloak-db
     networks:
@@ -132,6 +138,8 @@ services:
     environment:
       - PORT=8086
       - DATABASE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}?user=${USER_SERVICE_USER}&password=${USER_SERVICE_PASSWORD}
+      # Donnees de demo : seed/userservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
       - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
       - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
       - JWT_AUDIENCE=bagbuddy-api
@@ -145,6 +153,8 @@ services:
       - KEYCLOAK_ACCOUNTS_CLIENT_ID=bagbuddy-accounts
       - KEYCLOAK_ACCOUNTS_CLIENT_SECRET=${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
       - KEYCLOAK_LOGIN_CLIENT_ID=bagbuddy-web
+    volumes:
+      - ./seed/userservice:/seed:ro
     ports:
       - "8086:8086"
     healthcheck:
@@ -191,6 +201,8 @@ services:
     environment:
       - PORT=8082
       - DATABASE_URL=jdbc:postgresql://tripservice-db:5432/${TRIP_SERVICE_DB}?user=${TRIP_SERVICE_USER}&password=${TRIP_SERVICE_PASSWORD}
+      # Donnees de demo : seed/tripservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
       - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
       - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
       - JWT_AUDIENCE=bagbuddy-api
@@ -198,6 +210,8 @@ services:
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+    volumes:
+      - ./seed/tripservice:/seed:ro
     ports:
       - "8082:8082"
     healthcheck:
@@ -244,6 +258,8 @@ services:
     environment:
       - PORT=8083
       - DATABASE_URL=jdbc:postgresql://transactionservice-db:5432/${TRANSACTION_SERVICE_DB}?user=${TRANSACTION_SERVICE_USER}&password=${TRANSACTION_SERVICE_PASSWORD}
+      # Donnees de demo : seed/transactionservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
       - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
       - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
       - JWT_AUDIENCE=bagbuddy-api
@@ -255,9 +271,11 @@ services:
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
       - TRIP_SERVICE_URL=http://trip-service:8082
-      # stripe-service est desactive en dev : le paiement est simule, pas confirme par
-      # webhook. A remettre a true (defaut) des que stripe-service tourne.
-      - PAYMENTS_REQUIRE_STRIPE=false
+      # true (defaut) : une transaction ne passe "confirmed" qu'apres le webhook Stripe
+      # signe. false dans .env pour simuler le paiement sans cles Stripe.
+      - PAYMENTS_REQUIRE_STRIPE=${PAYMENTS_REQUIRE_STRIPE:-true}
+    volumes:
+      - ./seed/transactionservice:/seed:ro
     ports:
       - "8083:8083"
     healthcheck:
@@ -304,6 +322,8 @@ services:
     environment:
       - PORT=8084
       - DATABASE_URL=jdbc:postgresql://reviewservice-db:5432/${REVIEW_SERVICE_DB}?user=${REVIEW_SERVICE_USER}&password=${REVIEW_SERVICE_PASSWORD}
+      # Donnees de demo : seed/reviewservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
       - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
       - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
       - JWT_AUDIENCE=bagbuddy-api
@@ -312,6 +332,8 @@ services:
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
       - TRANSACTION_SERVICE_URL=http://transaction-service:8083
+    volumes:
+      - ./seed/reviewservice:/seed:ro
     ports:
       - "8084:8084"
     healthcheck:
@@ -349,35 +371,62 @@ services:
     networks:
       - bagbuddy-network
 
-  # Disabled for local dev: requires STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY / STRIPE_WEBHOOK_SECRET
-  # stripe-service:
-  #   build:
-  #     context: ./stripeservice
-  #     dockerfile: Dockerfile
-  #   container_name: stripe-service-dev
-  #   env_file:
-  #     - ./.env
-  #   ports:
-  #     - "8085:8085"
-  #   depends_on:
-  #     - keycloak
-  #   environment:
-  #     PORT: 8085
-  #     STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-  #     STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
-  #     STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
-  #     JWT_ISSUER_URIS: http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
-  #     JWT_JWK_SET_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
-  #     JWT_AUDIENCE: bagbuddy-api
-  #     GRAPHIQL_ENABLED: "true"
-  #     EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
-  #     ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
-  #     KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
-  #     KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
-  #     KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
-  #     TRANSACTION_SERVICE_URL: http://transaction-service:8083
-  #   networks:
-  #     - bagbuddy-network
+  # --- STRIPE SERVICE ---
+  # Refuse de demarrer tant que STRIPE_SECRET_KEY est vide : renseigne les cles de test
+  # (dashboard Stripe > Developpeurs > Cles API) dans .env. Les autres services n'en
+  # dependent pas, la stack reste utilisable sans.
+  stripe-service:
+    build:
+      context: ./stripeservice
+      dockerfile: Dockerfile
+    container_name: stripe-service-dev
+    environment:
+      - PORT=8085
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
+      - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - bagbuddy-network
+
+  # Relaie les webhooks Stripe (mode test) vers la gateway locale, que Stripe ne peut
+  # pas joindre directement. Optionnel : docker compose ... --profile stripe-webhooks up -d
+  # Le secret de signature qu'il utilise s'obtient avec la commande indiquee dans le
+  # README et va dans STRIPE_WEBHOOK_SECRET.
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    container_name: stripe-cli
+    profiles: ["stripe-webhooks"]
+    command: listen --forward-to http://api-gateway:8080/stripe/webhook --events payment_intent.succeeded
+    environment:
+      - STRIPE_API_KEY=${STRIPE_SECRET_KEY:-}
+    depends_on:
+      - api-gateway
+    networks:
+      - bagbuddy-network
 
 # --- VOLUMES & NETWORK ---
 volumes:
