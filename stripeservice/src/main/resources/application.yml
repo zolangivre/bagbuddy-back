@@ -15,7 +15,7 @@ spring:
       path: /stripe/graphiql
 
 server:
-  port: ${PORT}
+  port: ${PORT:8085}
 # --- Service discovery (Eureka) ---
 # Le service s'enregistre sous son spring.application.name : c'est ce nom que
 # l'apigateway resout (lb://stripe-service). Le port annonce est deduit de
@@ -35,10 +35,26 @@ eureka:
     lease-expiration-duration-in-seconds: 15
 
 management:
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
   endpoints:
     web:
       exposure:
         include: health
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
 
 logging:
   level:
@@ -71,3 +87,29 @@ spring.security.oauth2.client:
 bagbuddy.service-client.registration-id: bagbuddy-service
 bagbuddy.transaction-service.url: ${TRANSACTION_SERVICE_URL:http://localhost:8083}
 bagbuddy.stripe.currency: ${STRIPE_CURRENCY:eur}
+
+# --- Appels sortants ---
+# Delais courts et explicites : sans eux, un service muet fait patienter le
+# client jusqu'au timeout par defaut de la couche HTTP.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      transactionservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un 404 ou un refus d'acces sont des reponses, pas des pannes : les
+        # compter ouvrirait le circuit parce que des clients demandent des
+        # choses qui n'existent pas.
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException

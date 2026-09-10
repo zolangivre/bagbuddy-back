@@ -5,8 +5,43 @@ services:
       context: ./eurekaserver
       dockerfile: Dockerfile
     container_name: eureka-server
+    environment:
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
     ports:
       - "8761:8761"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8761/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      - bagbuddy-network
+
+  # --- TRACING ---
+  # Collecte les traces des 6 services. Aucune persistance : en memoire, ce qui
+  # convient au dev et perd tout au redemarrage.
+  zipkin:
+    image: openzipkin/zipkin:3.4
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - bagbuddy-network
+
+  # --- RATE LIMITING ---
+  # Compteurs du RequestRateLimiter du gateway. Sans persistance : les quotas
+  # repartent de zero a chaque redemarrage, ce qui convient au dev.
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - bagbuddy-network
 
@@ -18,11 +53,22 @@ services:
     container_name: api-gateway-dev
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
+      eureka-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: always
     environment:
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - REDIS_HOST=redis
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:4200}
     networks:
       - bagbuddy-network
@@ -63,6 +109,11 @@ services:
       POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
     volumes:
       - keycloak_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KEYCLOAK_DB_USER} -d ${KEYCLOAK_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - 5435:5432
     networks:
@@ -78,8 +129,6 @@ services:
       context: ./userservice
       dockerfile: Dockerfile
     container_name: user-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8086
       - DATABASE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}?user=${USER_SERVICE_USER}&password=${USER_SERVICE_PASSWORD}
@@ -89,6 +138,7 @@ services:
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
       - KEYCLOAK_BASE_URL=http://keycloak:8080
       - KEYCLOAK_REALM=bagbuddy
       - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
@@ -97,9 +147,19 @@ services:
       - KEYCLOAK_LOGIN_CLIENT_ID=bagbuddy-web
     ports:
       - "8086:8086"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - keycloak
-      - userservice-db
+      keycloak:
+        condition: service_started
+      userservice-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -112,6 +172,11 @@ services:
       POSTGRES_PASSWORD: ${USER_SERVICE_PASSWORD}
     volumes:
       - user_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${USER_SERVICE_USER} -d ${USER_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${USER_SERVICE_DB_PORT}:5432
     networks:
@@ -123,8 +188,6 @@ services:
       context: ./tripservice
       dockerfile: Dockerfile
     container_name: trip-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8082
       - DATABASE_URL=jdbc:postgresql://tripservice-db:5432/${TRIP_SERVICE_DB}?user=${TRIP_SERVICE_USER}&password=${TRIP_SERVICE_PASSWORD}
@@ -134,12 +197,22 @@ services:
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
     ports:
       - "8082:8082"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - keycloak
-      - tripservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      tripservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -152,6 +225,11 @@ services:
       POSTGRES_PASSWORD: ${TRIP_SERVICE_PASSWORD}
     volumes:
       - trip_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRIP_SERVICE_USER} -d ${TRIP_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${TRIP_SERVICE_DB_PORT}:5432
     networks:
@@ -163,8 +241,6 @@ services:
       context: ./transactionservice
       dockerfile: Dockerfile
     container_name: transaction-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8083
       - DATABASE_URL=jdbc:postgresql://transactionservice-db:5432/${TRANSACTION_SERVICE_DB}?user=${TRANSACTION_SERVICE_USER}&password=${TRANSACTION_SERVICE_PASSWORD}
@@ -174,6 +250,7 @@ services:
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
       - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
@@ -183,10 +260,19 @@ services:
       - PAYMENTS_REQUIRE_STRIPE=false
     ports:
       - "8083:8083"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - keycloak
-      - transactionservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      transactionservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -199,6 +285,11 @@ services:
       POSTGRES_PASSWORD: ${TRANSACTION_SERVICE_PASSWORD}
     volumes:
       - transaction_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRANSACTION_SERVICE_USER} -d ${TRANSACTION_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${TRANSACTION_SERVICE_DB_PORT}:5432
     networks:
@@ -210,8 +301,6 @@ services:
       context: ./reviewservice
       dockerfile: Dockerfile
     container_name: review-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8084
       - DATABASE_URL=jdbc:postgresql://reviewservice-db:5432/${REVIEW_SERVICE_DB}?user=${REVIEW_SERVICE_USER}&password=${REVIEW_SERVICE_PASSWORD}
@@ -221,13 +310,23 @@ services:
       # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
       - TRANSACTION_SERVICE_URL=http://transaction-service:8083
     ports:
       - "8084:8084"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - keycloak
-      - reviewservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      reviewservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -240,6 +339,11 @@ services:
       POSTGRES_PASSWORD: ${REVIEW_SERVICE_PASSWORD}
     volumes:
       - review_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${REVIEW_SERVICE_USER} -d ${REVIEW_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${REVIEW_SERVICE_DB_PORT}:5432
     networks:
@@ -267,6 +371,7 @@ services:
   #     JWT_AUDIENCE: bagbuddy-api
   #     GRAPHIQL_ENABLED: "true"
   #     EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+  #     ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
   #     KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
   #     KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
   #     KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}

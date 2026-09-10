@@ -1,6 +1,8 @@
 package com.bagbuddy.reviewservice.client;
 
+import com.bagbuddy.reviewservice.web.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.graphql.ResponseError;
 import org.springframework.graphql.client.FieldAccessException;
 import org.springframework.graphql.client.HttpSyncGraphQlClient;
@@ -24,6 +26,8 @@ import java.util.NoSuchElementException;
 @Component
 public class TransactionClient {
 
+    private static final String CIRCUIT = "transactionservice";
+
     private static final String TRANSACTION_DOCUMENT = """
             query Transaction($id: ID!) {
                 transaction(id: $id) {
@@ -37,15 +41,23 @@ public class TransactionClient {
             """;
 
     private final HttpSyncGraphQlClient graphQlClient;
+    private final CircuitBreakerFactory<?, ?> circuitBreakerFactory;
 
     public TransactionClient(RestClient.Builder builder,
+                             CircuitBreakerFactory<?, ?> circuitBreakerFactory,
                              @Value("${bagbuddy.transaction-service.url}") String transactionServiceUrl) {
+        this.circuitBreakerFactory = circuitBreakerFactory;
         this.graphQlClient = HttpSyncGraphQlClient.builder(
                         builder.baseUrl(transactionServiceUrl + "/transactions/graphql"))
                 .build();
     }
 
     public TransactionSnapshot fetchAsCaller(Long transactionId, String callerToken) {
+        return circuitBreakerFactory.create(CIRCUIT)
+                .run(() -> doFetchAsCaller(transactionId, callerToken), failFast());
+    }
+
+    private TransactionSnapshot doFetchAsCaller(Long transactionId, String callerToken) {
         try {
             return graphQlClient.mutate()
                     .headers(headers -> headers.setBearerAuth(callerToken))
@@ -65,6 +77,22 @@ public class TransactionClient {
             }
             throw ex;
         }
+    }
+
+    /**
+     * Le repli ne fabrique aucune valeur de remplacement : les reponses metier
+     * (introuvable, non-participant) remontent intactes, et tout le reste devient
+     * une indisponibilite explicite plutot qu'une erreur interne opaque.
+     */
+    private static <T> java.util.function.Function<Throwable, T> failFast() {
+        return throwable -> {
+            if (throwable instanceof NoSuchElementException
+                    || throwable instanceof IllegalArgumentException
+                    || throwable instanceof AccessDeniedException) {
+                throw (RuntimeException) throwable;
+            }
+            throw new ServiceUnavailableException(CIRCUIT, throwable);
+        };
     }
 
     private RuntimeException translate(List<ResponseError> errors, Long transactionId) {

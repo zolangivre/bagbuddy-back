@@ -3,7 +3,6 @@
 
 scalar DateTime
 scalar BigDecimal
-scalar Long
 
 type Query {
     "Toutes les annonces, les plus recentes d'abord."

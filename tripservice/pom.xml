@@ -34,6 +34,15 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-data-jpa</artifactId>
 		</dependency>
+		<!-- Flyway : le schema est versionne dans db/migration, plus genere au demarrage. -->
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-database-postgresql</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.postgresql</groupId>
@@ -60,6 +69,11 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
+		<!-- Actuator : /actuator/health, la sonde que docker-compose interroge. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-graphql</artifactId>
@@ -82,11 +96,36 @@
 			<artifactId>spring-graphql-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Testcontainers : un vrai PostgreSQL pour ce qu'H2 n'emule pas
+		     fidelement, a commencer par SELECT ... FOR UPDATE. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-testcontainers</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
 		<dependency>
 			<groupId>com.h2database</groupId>
 			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.zipkin.reporter2</groupId>
+            <artifactId>zipkin-reporter-brave</artifactId>
+        </dependency>
     </dependencies>
 
 	<build>
@@ -127,6 +166,8 @@
 				<type>pom</type>
 				<scope>import</scope>
 			</dependency>
+			<!-- Tracing distribue : un identifiant de trace commun traverse le gateway et
+			     les services, et se retrouve dans chaque ligne de log. -->
 		</dependencies>
 	</dependencyManagement>
 

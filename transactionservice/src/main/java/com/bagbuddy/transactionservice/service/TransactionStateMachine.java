@@ -1,6 +1,7 @@
 package com.bagbuddy.transactionservice.service;
 
 import com.bagbuddy.transactionservice.config.TransactionStatusProperties;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -34,12 +35,10 @@ public class TransactionStateMachine {
     public record Transition(StatusPair from, StatusPair to, List<Actor> allowedActors, Effect effect) {
     }
 
-    private final TransactionStatusProperties status;
     private final List<Transition> transitions;
     private final StatusPair initial;
 
     public TransactionStateMachine(TransactionStatusProperties status) {
-        this.status = status;
 
         StatusPair requested = new StatusPair(status.getReservationReceived(), status.getWaitingForResponseBuyer());
         StatusPair rejected = new StatusPair(status.getWaitingForResponseSeller(), status.getRequestRejected());
@@ -89,7 +88,7 @@ public class TransactionStateMachine {
         }
         Transition transition = matching.get(0);
         if (!transition.allowedActors().contains(actor)) {
-            throw new org.springframework.security.access.AccessDeniedException(
+            throw new AccessDeniedException(
                     "The %s may not perform this transition".formatted(actor.name().toLowerCase()));
         }
         return Optional.of(transition);

@@ -1,5 +1,6 @@
 package com.bagbuddy.reviewservice.config;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -45,6 +46,10 @@ public class SecurityConfig {
                 .cors(cors -> cors.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        // Sans ca, une erreur de validation (400) repart en 401 : le
+                        // forward vers /error repasse par la chaine de securite, qui ne
+                        // voit plus de jeton sur la requete interne.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers("/actuator/health/**").permitAll()
                         // Console GraphiQL : page statique, sans donnees. Les requetes
                         // qu'elle emet passent par /reviews/graphql et restent authentifiees.

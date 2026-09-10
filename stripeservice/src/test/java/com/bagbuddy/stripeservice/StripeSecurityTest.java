@@ -94,7 +94,6 @@ class StripeSecurityTest {
     void anAlreadyPaidTransactionIsNotChargedTwice() throws Exception {
         TransactionSnapshot paid = unpaidDeal();
         paid.setPaidAt(LocalDateTime.now().minusDays(1));
-        paid.setStripePaymentIntentId("pi_already");
         when(transactionClient.fetchAsCaller(any(), anyString())).thenReturn(paid);
 
         mockMvc.perform(graphql("""

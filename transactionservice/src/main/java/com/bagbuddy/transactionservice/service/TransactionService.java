@@ -8,14 +8,16 @@ import com.bagbuddy.transactionservice.model.UserInfo;
 import com.bagbuddy.transactionservice.repository.TransactionRepository;
 import com.bagbuddy.transactionservice.security.CallerIdentity;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Actor;
+import com.bagbuddy.transactionservice.service.TransactionStateMachine.Effect;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.StatusPair;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Transition;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -24,16 +26,27 @@ import java.util.List;
 import java.util.NoSuchElementException;
 
 @Service
+// Lectures en readOnly par defaut : Hibernate n'garde pas de snapshot de
+// dirty-checking et ne flushe pas. Chaque methode d'ecriture porte son propre
+// @Transactional, qui surcharge ce defaut.
+@Transactional(readOnly = true)
 public class TransactionService {
 
-    @Autowired
-    private TransactionRepository transactionRepository;
+    private final TransactionRepository transactionRepository;
+    private final TripClient tripClient;
+    private final TransactionStateMachine stateMachine;
+    /** Ecriture programmatique : la phase d'ecriture de update() ne peut pas passer par le proxy. */
+    private final TransactionTemplate writeTx;
 
-    @Autowired
-    private TripClient tripClient;
-
-    @Autowired
-    private TransactionStateMachine stateMachine;
+    public TransactionService(TransactionRepository transactionRepository,
+                              TripClient tripClient,
+                              TransactionStateMachine stateMachine,
+                              TransactionTemplate writeTx) {
+        this.transactionRepository = transactionRepository;
+        this.tripClient = tripClient;
+        this.stateMachine = stateMachine;
+        this.writeTx = writeTx;
+    }
 
     /**
      * When true (the default, and the only safe setting in production), a transaction may only
@@ -61,19 +74,11 @@ public class TransactionService {
     }
 
     public Double getTotalEarnedBySeller(String sellerId) {
-        return completedTotal(transactionRepository.findBySellerId(sellerId));
+        return transactionRepository.sumCompletedBySeller(sellerId).doubleValue();
     }
 
     public Double getTotalSpentByBuyer(String buyerId) {
-        return completedTotal(transactionRepository.findByBuyerId(buyerId));
-    }
-
-    private Double completedTotal(List<Transaction> transactions) {
-        return transactions.stream()
-                .filter(tx -> "completed".equalsIgnoreCase(tx.getBuyerStatus()) &&
-                        "completed".equalsIgnoreCase(tx.getSellerStatus()))
-                .mapToDouble(tx -> tx.getTotal().doubleValue())
-                .sum();
+        return transactionRepository.sumCompletedByBuyer(buyerId).doubleValue();
     }
 
     /** Participant-only read: a transaction carries both parties' contact details. */
@@ -141,12 +146,42 @@ public class TransactionService {
      * fields are never taken from the body: a re-priced request is recomputed from the listing,
      * and payment is settled through Stripe.
      */
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public Transaction update(Long id, Transaction body, String callerSub) {
-        Transaction existing = findOrThrow(id);
-        requireParticipant(existing, callerSub);
+        // --- Phase 1 : lecture courte, pour savoir quelle arete du graphe est demandee.
+        Transaction snapshot = findOrThrow(id);
+        requireParticipant(snapshot, callerSub);
+        Actor actor = callerSub.equals(snapshot.getBuyerId()) ? Actor.BUYER : Actor.SELLER;
+        Transition planned = stateMachine
+                .resolve(pairOf(snapshot), requestedPair(snapshot, body), actor)
+                .orElse(null);
 
-        Actor actor = callerSub.equals(existing.getBuyerId()) ? Actor.BUYER : Actor.SELLER;
+        // --- Phase 2 : appels a tripservice, aucune connexion DB retenue pendant l'attente.
+        Repricing repricing = null;
+        if (planned != null) {
+            switch (planned.effect()) {
+                case REPRICE -> repricing = quote(snapshot.getListingId(), body.getWeight());
+                case RESERVE_CAPACITY -> reserveCapacity(snapshot.getListingId(), snapshot.getWeight());
+                case SETTLE_PAYMENT, NONE -> { }
+            }
+        }
+
+        // --- Phase 3 : ecriture courte, sous verrou de ligne.
+        Effect expected = planned == null ? null : planned.effect();
+        Repricing priced = repricing;
+        return writeTx.execute(status -> applyUpdate(id, body, callerSub, actor, expected, priced));
+    }
+
+    /**
+     * Relit la ligne sous verrou et rejoue la resolution : entre la phase 1 et ici, l'autre
+     * partie a pu bouger la transaction, auquel cas les effets distants deja joues ne
+     * correspondent plus a la transition et la mise a jour est refusee plutot qu'appliquee.
+     */
+    private Transaction applyUpdate(Long id, Transaction body, String callerSub,
+                                    Actor actor, Effect expected, Repricing repricing) {
+        Transaction existing = transactionRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
+        requireParticipant(existing, callerSub);
 
         // Each side owns its own "I have written my review" flag.
         if (actor == Actor.BUYER && body.getBuyerReview() != null) {
@@ -156,21 +191,23 @@ public class TransactionService {
             existing.setSellerReview(body.getSellerReview());
         }
 
-        StatusPair from = new StatusPair(existing.getSellerStatus(), existing.getBuyerStatus());
-        StatusPair to = new StatusPair(
-                body.getSellerStatus() == null ? existing.getSellerStatus() : body.getSellerStatus(),
-                body.getBuyerStatus() == null ? existing.getBuyerStatus() : body.getBuyerStatus());
-
-        Transition transition = stateMachine.resolve(from, to, actor).orElse(null);
+        StatusPair to = requestedPair(existing, body);
+        Transition transition = stateMachine.resolve(pairOf(existing), to, actor).orElse(null);
         if (transition == null) {
             return transactionRepository.save(existing);
         }
+        if (transition.effect() != expected) {
+            throw new IllegalStateException(
+                    "Transaction " + id + " changed while it was being updated; retry");
+        }
 
         switch (transition.effect()) {
-            case REPRICE -> reprice(existing, body.getWeight());
-            case RESERVE_CAPACITY -> reserveCapacity(existing);
+            case REPRICE -> {
+                existing.setWeight(repricing.weight());
+                existing.setTotal(repricing.total());
+            }
             case SETTLE_PAYMENT -> settlePayment(existing);
-            case NONE -> { }
+            case RESERVE_CAPACITY, NONE -> { }
         }
 
         existing.setSellerStatus(to.sellerStatus());
@@ -178,31 +215,44 @@ public class TransactionService {
         return transactionRepository.save(existing);
     }
 
+    private StatusPair pairOf(Transaction tx) {
+        return new StatusPair(tx.getSellerStatus(), tx.getBuyerStatus());
+    }
+
+    private StatusPair requestedPair(Transaction existing, Transaction body) {
+        return new StatusPair(
+                body.getSellerStatus() == null ? existing.getSellerStatus() : body.getSellerStatus(),
+                body.getBuyerStatus() == null ? existing.getBuyerStatus() : body.getBuyerStatus());
+    }
+
+    /** Poids et prix recalcules depuis l'annonce, jamais pris dans le corps de la requete. */
+    private record Repricing(BigDecimal weight, BigDecimal total) { }
+
     /** A new request with a different weight: the price is recomputed from the listing. */
-    private void reprice(Transaction existing, BigDecimal weight) {
+    private Repricing quote(Long listingId, BigDecimal weight) {
         if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("weight must be greater than zero");
         }
-        TripSnapshot trip = tripClient.fetch(existing.getListingId());
+        TripSnapshot trip = tripClient.fetch(listingId);
         if (trip == null || trip.getPricePerKg() == null) {
-            throw new NoSuchElementException("Listing not found: " + existing.getListingId());
+            throw new NoSuchElementException("Listing not found: " + listingId);
         }
         if (trip.getRemainingWeight() == null || weight.compareTo(trip.getRemainingWeight()) > 0) {
             throw new IllegalArgumentException("Requested weight exceeds the remaining capacity");
         }
-        existing.setWeight(weight);
-        existing.setTotal(trip.getPricePerKg().multiply(weight).setScale(2, RoundingMode.HALF_UP));
+        return new Repricing(weight,
+                trip.getPricePerKg().multiply(weight).setScale(2, RoundingMode.HALF_UP));
     }
 
     /**
      * The seller accepting is the commitment point, so this is where the weight leaves the
      * listing -- decided by tripservice under a row lock, never by the caller.
      */
-    private void reserveCapacity(Transaction existing) {
-        TripSnapshot reserved = tripClient.reserve(existing.getListingId(), existing.getWeight());
+    private void reserveCapacity(Long listingId, BigDecimal weight) {
+        TripSnapshot reserved = tripClient.reserve(listingId, weight);
         if (reserved == null) {
-            throw new IllegalStateException("Capacity reservation returned nothing for listing "
-                    + existing.getListingId());
+            throw new IllegalStateException(
+                    "Capacity reservation returned nothing for listing " + listingId);
         }
     }
 

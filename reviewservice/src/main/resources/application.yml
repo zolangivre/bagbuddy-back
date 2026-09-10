@@ -18,16 +18,28 @@ spring:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
 
+  flyway:
+    # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
+    # d'historique Flyway : on les marque au niveau V1 (deja en place) au lieu
+    # d'echouer, et seules les migrations suivantes leur sont appliquees.
+    baseline-on-migrate: true
+    baseline-version: 1
+
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      # Le schema appartient a Flyway. 'validate' echoue au demarrage si les
+      # entites et les migrations ont diverge -- c'est le but : mieux vaut ne pas
+      # demarrer que decouvrir la divergence sur une requete en production.
+      ddl-auto: validate
+    show-sql: false
+    # Une requete HTTP ne doit pas retenir une connexion DB pendant la serialisation GraphQL.
+    open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 server:
-  port: ${PORT:8082}
+  port: ${PORT:8084}
 
 # --- Service discovery (Eureka) ---
 # Le service s'enregistre sous son spring.application.name : c'est ce nom que
@@ -49,7 +61,8 @@ eureka:
 
 logging:
   level:
-    org.hibernate.SQL: debug
+    # Trace SQL a la demande : SQL_LOG_LEVEL=debug en local si besoin.
+    org.hibernate.SQL: ${SQL_LOG_LEVEL:warn}
     org.springframework: info
 
 # --- Authentification (Keycloak) ---
@@ -63,3 +76,51 @@ bagbuddy:
     audience: ${JWT_AUDIENCE:bagbuddy-api}
 
 bagbuddy.transaction-service.url: ${TRANSACTION_SERVICE_URL:http://localhost:8083}
+
+management:
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+# --- Appels sortants ---
+# Delais courts et explicites : sans eux, un service muet fait patienter le
+# client jusqu'au timeout par defaut de la couche HTTP.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      transactionservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un 404 ou un refus d'acces sont des reponses, pas des pannes : les
+        # compter ouvrirait le circuit parce que des clients demandent des
+        # choses qui n'existent pas.
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException

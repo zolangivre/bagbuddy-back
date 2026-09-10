@@ -18,10 +18,22 @@ spring:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
 
+  flyway:
+    # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
+    # d'historique Flyway : on les marque au niveau V1 (deja en place) au lieu
+    # d'echouer, et seules les migrations suivantes leur sont appliquees.
+    baseline-on-migrate: true
+    baseline-version: 1
+
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      # Le schema appartient a Flyway. 'validate' echoue au demarrage si les
+      # entites et les migrations ont diverge -- c'est le but : mieux vaut ne pas
+      # demarrer que decouvrir la divergence sur une requete en production.
+      ddl-auto: validate
+    show-sql: false
+    # Une requete HTTP ne doit pas retenir une connexion DB pendant la serialisation GraphQL.
+    open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -49,7 +61,8 @@ eureka:
 
 logging:
   level:
-    org.hibernate.SQL: debug
+    # Trace SQL a la demande : SQL_LOG_LEVEL=debug en local si besoin.
+    org.hibernate.SQL: ${SQL_LOG_LEVEL:warn}
     org.springframework: info
 
 # --- Authentification (Keycloak) ---
@@ -61,3 +74,25 @@ bagbuddy:
     issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
     jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
     audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+management:
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true

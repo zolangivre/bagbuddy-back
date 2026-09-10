@@ -13,6 +13,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
+import java.util.Map;
 import java.util.NoSuchElementException;
 
 /**
@@ -28,6 +29,16 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
 
     @Override
     protected GraphQLError resolveToSingleError(Throwable ex, DataFetchingEnvironment env) {
+        if (ex instanceof ServiceUnavailableException unavailable) {
+            // Classification INTERNAL_ERROR : ce n'est pas la faute de l'appelant.
+            // Le code, lui, dit que reessayer a un sens -- ce qu'un INTERNAL_ERROR
+            // nu ne dirait pas.
+            return GraphqlErrorBuilder.newError(env)
+                    .errorType(ErrorType.INTERNAL_ERROR)
+                    .message("Service momentanement indisponible : " + unavailable.getService())
+                    .extensions(Map.of("code", "service_unavailable"))
+                    .build();
+        }
         if (ex instanceof AccessDeniedException) {
             // Un appelant non authentifie qui bute sur une regle d'acces doit lire UNAUTHORIZED
             // et non FORBIDDEN : il lui manque un jeton, pas un droit.

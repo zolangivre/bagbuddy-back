@@ -2,6 +2,13 @@ spring:
   application:
     name: api-gateway
 
+  # Compteurs de RequestRateLimiter (route /users/**). Le gateway ne demarre pas
+  # sans Redis des lors qu'une route est limitee.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
   cloud:
     loadbalancer:
       cache:
@@ -49,6 +56,16 @@ spring:
           uri: lb://user-service
           predicates:
             - Path=/users/**
+          # Seule route portant une operation anonyme (register), et cette
+          # operation declenche des appels a l'API d'administration de Keycloak :
+          # c'est la qu'une limite par IP a le plus de valeur. Les autres routes
+          # exigent un jeton, ce qui limite deja la casse.
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_PER_SECOND:10}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST:20}
+                key-resolver: "#{@clientIpKeyResolver}"
 
       globalcors:
         cors-configurations:
@@ -82,13 +99,25 @@ server:
   port: ${PORT:8080}
 
 management:
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
   endpoints:
     web:
       exposure:
         include: health
   endpoint:
     health:
-      show-details: always
+      # Le gateway n'a aucune securite devant lui : 'always' publierait l'etat
+      # de l'infra a qui sait joindre le port.
+      show-details: when-authorized
+      probes:
+        enabled: true
 
 logging:
   level:

@@ -2,14 +2,9 @@ package com.bagbuddy.transactionservice.model;
 
 import jakarta.persistence.*;
 import lombok.Data;
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.Map;
 
 @Data
 @Entity

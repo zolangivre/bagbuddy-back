@@ -14,5 +14,4 @@ public class TransactionSnapshot {
     private String sellerId;
     private BigDecimal total;
     private LocalDateTime paidAt;
-    private String stripePaymentIntentId;
 }

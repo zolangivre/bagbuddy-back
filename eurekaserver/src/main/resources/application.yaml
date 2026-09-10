@@ -27,6 +27,28 @@ eureka:
     enable-self-preservation: false
     eviction-interval-timer-in-ms: 10000
 
+management:
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
+
 logging:
   level:
     # Volontairement pas a OFF : c'est ici qu'on lit "Registered instance

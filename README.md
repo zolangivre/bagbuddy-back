@@ -56,6 +56,7 @@ minutes. Une fois debout, tout ceci est prêt sans configuration supplémentaire
 | Keycloak                | http://localhost:8000            |
 | Console admin Keycloak  | http://localhost:8000/admin (`KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` du `.env`) |
 | Dashboard Eureka        | http://localhost:8761            |
+| Zipkin (traces)         | http://localhost:9411            |
 | trip-service            | http://localhost:8082            |
 | transaction-service     | http://localhost:8083            |
 | review-service          | http://localhost:8084            |
@@ -100,6 +101,54 @@ Deux comportements a connaitre :
 Les trois appels service-a-service (`transactionservice` -> `tripservice`,
 `stripeservice` -> `transactionservice`) restent volontairement sur des URLs
 statiques : ils sont peu nombreux, figes, et sur le chemin du paiement.
+
+## Base de donnees et migrations
+
+Le schema appartient a **Flyway**, plus a Hibernate : les migrations vivent dans
+`<service>/src/main/resources/db/migration` et `ddl-auto` est passe a `validate`,
+ce qui fait echouer le demarrage si les entites et les migrations ont diverge.
+C'est voulu — mieux vaut ne pas demarrer que decouvrir l'ecart sur une requete.
+
+`V1__baseline.sql` decrit le schema tel qu'Hibernate l'avait cree. Sur une base
+existante, Flyway la marque comme deja appliquee (`baseline-on-migrate`) au lieu
+de la rejouer : les donnees de dev survivent a la bascule. Sur une base neuve,
+elle est jouee normalement.
+
+Pour ajouter une colonne : ecris `V3__...sql`, ne touche jamais a une migration
+deja appliquee, et mets l'entite JPA en face.
+
+## Observabilite
+
+- **Sondes** : `/actuator/health` sur chaque service (et sur le gateway et
+  Eureka). Docker s'en sert : `depends_on` attend desormais `service_healthy` et
+  non le simple demarrage du conteneur. Le detail (base, disque, registre) n'est
+  affiche qu'a un appelant authentifie.
+- **Traces** : un `traceId` commun traverse le gateway et les services, et se
+  retrouve dans chaque ligne de log. Zipkin les collecte sur
+  `http://localhost:9411` — c'est la qu'on voit ou une requete a passe son temps.
+  Le taux d'echantillonnage est a 100 % en dev (`TRACING_SAMPLE_RATE`), a baisser
+  ailleurs.
+
+## Resilience et abus
+
+Les appels sortants vers un autre service passent par un **coupe-circuit**
+(Resilience4j) et des delais courts (2 s de connexion, 5 s de lecture). Deux
+choix a connaitre :
+
+- **Aucun repli ne fabrique de valeur.** On ne tarife pas une reservation contre
+  une annonce qu'on n'a pas lue : un prix par defaut serait pire qu'une erreur.
+  Le client recoit `classification: INTERNAL_ERROR` avec
+  `extensions.code = service_unavailable`, qui dit que reessayer a un sens.
+- **La reservation de capacite n'est jamais rejouee.** Ce POST retire du poids
+  d'une annonce ; le rejouer apres un timeout ambigu reserverait deux fois.
+
+Un 404 ou un refus d'acces ne comptent pas comme des pannes : sans cela, des
+clients demandant des choses inexistantes finiraient par ouvrir le circuit.
+
+La route `/users/**` est **limitee a 10 requetes/seconde par IP** (rafale de 20),
+compteurs dans Redis. C'est la seule route portant une operation anonyme
+(`register`), et cette operation declenche des appels a l'API d'administration de
+Keycloak. Consequence : **le gateway a maintenant besoin de Redis pour demarrer**.
 
 ## API GraphQL
 
@@ -247,6 +296,14 @@ mémoire, sans Docker ni Keycloak :
 cd tripservice && ./mvnw test
 ```
 
+Une exception : `TripCapacityConcurrencyTest` a besoin d'un vrai PostgreSQL,
+parce qu'il vérifie précisément ce qu'H2 n'émule pas fidèlement — le
+`SELECT ... FOR UPDATE` qui empêche deux réservations simultanées de survendre la
+capacité d'une annonce. Il démarre un conteneur via Testcontainers si Docker est
+disponible, accepte sinon une base fournie par l'environnement (voir le javadoc
+de la classe), et **s'ignore de lui-même** si ni l'un ni l'autre — le reste de la
+suite continue de tourner sans Docker.
+
 Les cinq services métier embarquent des tests de sécurité qui vérifient
 concrètement les règles ci-dessus, en tapant sur le vrai endpoint GraphQL à
 travers toute la chaîne de filtres : accès anonyme refusé, propriété, masquage
@@ -260,10 +317,15 @@ N'oublie pas d'ajouter un Dockerfile et le bloc de service correspondant dans
 `JWT_ISSUER_URIS`, `JWT_JWK_SET_URI`, `JWT_AUDIENCE` et
 `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE`.
 
-Côté service, il lui faut aussi la dépendance
-`spring-cloud-starter-netflix-eureka-client`, le bloc `eureka:` de son
-`application.yml` (recopiable depuis n'importe quel service existant),
-`eureka.client.enabled=false` dans ses propriétés de test, et son chemin GraphQL
-préfixé (`spring.graphql.http.path`). Enfin, ajoute sa route `lb://<nom>` dans
+Côté service, il lui faut aussi les dépendances
+`spring-cloud-starter-netflix-eureka-client`, `spring-boot-starter-actuator`,
+`micrometer-tracing-bridge-brave` et `zipkin-reporter-brave` ; les blocs
+`eureka:` et `management:` de son `application.yml` (recopiables depuis n'importe
+quel service existant) ; `eureka.client.enabled=false` et
+`management.tracing.enabled=false` dans ses propriétés de test ; et son chemin
+GraphQL préfixé (`spring.graphql.http.path`). S'il a une base : Flyway,
+`ddl-auto: validate`, un `V1__baseline.sql`, et `spring.flyway.enabled=false`
+dans ses propriétés de test. Dans `docker-compose.dev.yml`, donne-lui son
+`healthcheck` et un `depends_on` en `service_healthy`. Enfin, ajoute sa route `lb://<nom>` dans
 `apigateway/src/main/resources/application.yaml`, où `<nom>` est son
 `spring.application.name`.

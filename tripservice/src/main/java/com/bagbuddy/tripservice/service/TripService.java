@@ -3,38 +3,45 @@ package com.bagbuddy.tripservice.service;
 import com.bagbuddy.tripservice.model.Trip;
 import com.bagbuddy.tripservice.repository.TripRepository;
 import com.bagbuddy.tripservice.security.CallerIdentity;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.stream.Collectors;
 
 @Service
+// Lectures en readOnly par defaut : Hibernate n'garde pas de snapshot de
+// dirty-checking et ne flushe pas. Chaque methode d'ecriture porte son propre
+// @Transactional, qui surcharge ce defaut.
+@Transactional(readOnly = true)
 public class TripService {
 
-    @Autowired
-    private TripRepository tripRepository;
+    private final TripRepository tripRepository;
+
+    public TripService(TripRepository tripRepository) {
+        this.tripRepository = tripRepository;
+    }
 
     public List<Trip> getAllTrips() {
         return tripRepository.findAllByOrderByCreatedAtDesc();
     }
 
+    /**
+     * Filtre en base et non en memoire : la version precedente chargeait toute la
+     * table avant d'ecarter les lignes en Java, ce qui ne tient pas passe quelques
+     * centaines d'annonces.
+     */
     public List<Trip> getActiveTrips() {
-        return tripRepository.findAllByOrderByCreatedAtDesc().stream()
-                .filter(this::isActive)
-                .collect(Collectors.toList());
+        return tripRepository.findActive(LocalDateTime.now());
     }
 
     public List<Trip> getInactiveTrips() {
-        return tripRepository.findAllByOrderByCreatedAtDesc().stream()
-                .filter(trip -> !isActive(trip))
-                .collect(Collectors.toList());
+        return tripRepository.findInactive(LocalDateTime.now());
     }
 
     private boolean isActive(Trip trip) {
@@ -55,19 +62,18 @@ public class TripService {
      * The owner is taken from the access token, so a client cannot publish a trip under
      * another user's identity by forging userId / userInfo.sub in the request body.
      */
+    @Transactional
     public Trip createTrip(Trip trip, Jwt caller) {
         trip.setId(null);
         trip.setUserId(CallerIdentity.subOf(caller));
         trip.setUserInfo(CallerIdentity.fromToken(caller, trip.getUserInfo()));
 
-        boolean stillAvailable = trip.getRemainingWeight() != null
-                && trip.getRemainingWeight().compareTo(BigDecimal.ZERO) > 0
-                && trip.getDepartureDate() != null
-                && trip.getDepartureDate().isAfter(LocalDateTime.now());
-        trip.setActive(stillAvailable);
+        // 'active' n'est pas calcule ici : TripListener le recalcule en @PrePersist et
+        // ecraserait la valeur. Une seule formule, un seul endroit.
         return tripRepository.save(trip);
     }
 
+    @Transactional
     public Trip updateTrip(Long id, Trip tripDetails, String callerSub) {
         Trip existingTrip = getTripById(id);
         requireOwner(existingTrip, callerSub);
@@ -86,6 +92,7 @@ public class TripService {
         return tripRepository.save(existingTrip);
     }
 
+    @Transactional
     public void deleteTrip(Long id, String callerSub) {
         Trip trip = getTripById(id);
         requireOwner(trip, callerSub);
@@ -93,12 +100,9 @@ public class TripService {
     }
 
     public String getStripeAccountIdByUser(String userId) {
-        List<Trip> userTrips = getTripsByUserId(userId);
-        if (userTrips.isEmpty()) {
-            return null;
-        }
-        // userTrips is sorted by createdAt desc, so the first one is the latest.
-        return userTrips.get(0).getStripeAccountId();
+        // La plus recente annonce suffit : une projection LIMIT 1 plutot que tout l'historique.
+        return tripRepository.findLatestStripeAccountId(userId, PageRequest.of(0, 1))
+                .stream().findFirst().orElse(null);
     }
 
     /**

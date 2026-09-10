@@ -5,8 +5,6 @@
 # projet ouvert sans jeton, parce que l'inscription est une operation de ce meme schema.
 # L'authentification est donc portee resolver par resolver (@PreAuthorize), pas par l'URL.
 
-scalar DateTime
-
 type Query {
     "Profil de l'appelant, cree a la volee a la premiere visite depuis les claims du jeton."
     me: UserProfile!

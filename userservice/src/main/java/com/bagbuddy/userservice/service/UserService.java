@@ -10,6 +10,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.NoSuchElementException;
 
 @Service
+// Lectures en readOnly par defaut : Hibernate n'garde pas de snapshot de
+// dirty-checking et ne flushe pas. Chaque methode d'ecriture porte son propre
+// @Transactional, qui surcharge ce defaut.
+@Transactional(readOnly = true)
 public class UserService {
 
     private final UserRepository userRepository;

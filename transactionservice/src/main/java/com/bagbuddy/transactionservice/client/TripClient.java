@@ -1,32 +1,55 @@
 package com.bagbuddy.transactionservice.client;
 
+import com.bagbuddy.transactionservice.web.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.http.HttpHeaders;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.function.Function;
 
 @Component
 public class TripClient {
 
+    private static final String CIRCUIT = "tripservice";
+
     private final RestClient restClient;
     private final ServiceTokenProvider tokenProvider;
+    private final CircuitBreakerFactory<?, ?> circuitBreakerFactory;
 
     public TripClient(RestClient.Builder builder,
                       ServiceTokenProvider tokenProvider,
+                      CircuitBreakerFactory<?, ?> circuitBreakerFactory,
                       @Value("${bagbuddy.trip-service.url}") String tripServiceUrl) {
         this.restClient = builder.baseUrl(tripServiceUrl).build();
         this.tokenProvider = tokenProvider;
+        this.circuitBreakerFactory = circuitBreakerFactory;
     }
 
     /**
-     * Reserves capacity and returns the listing as it now stands. Doing this in one call
-     * means the capacity check and the price come from the same locked read on tripservice.
+     * Reserve la capacite et renvoie l'annonce telle qu'elle est desormais. Faire
+     * les deux en un appel garantit que le controle de capacite et le prix
+     * proviennent de la meme lecture verrouillee cote tripservice.
+     *
+     * Volontairement sans reessai : ce POST retire du poids d'une annonce. Le
+     * rejouer apres un timeout ambigu reserverait deux fois.
      */
     public TripSnapshot reserve(Long listingId, java.math.BigDecimal weight) {
+        return circuitBreakerFactory.create(CIRCUIT)
+                .run(() -> doReserve(listingId, weight), failFast());
+    }
+
+    public TripSnapshot fetch(Long listingId) {
+        return circuitBreakerFactory.create(CIRCUIT)
+                .run(() -> doFetch(listingId), failFast());
+    }
+
+    private TripSnapshot doReserve(Long listingId, java.math.BigDecimal weight) {
         try {
             return restClient.post()
                     .uri("/trips/internal/{id}/reserve", listingId)
@@ -45,7 +68,7 @@ public class TripClient {
         }
     }
 
-    public TripSnapshot fetch(Long listingId) {
+    private TripSnapshot doFetch(Long listingId) {
         try {
             return restClient.get()
                     .uri("/trips/internal/{id}", listingId)
@@ -58,5 +81,23 @@ public class TripClient {
             }
             throw ex;
         }
+    }
+
+    /**
+     * Le repli ne fabrique jamais de valeur de remplacement : on ne tarife pas une
+     * reservation contre une annonce qu'on n'a pas lue, et un prix par defaut
+     * serait pire qu'une erreur. Les reponses metier (introuvable, refuse,
+     * invalide) remontent intactes ; tout le reste devient une indisponibilite
+     * explicite, que le coupe-circuit ne confonde pas avec une regle du domaine.
+     */
+    private static <T> Function<Throwable, T> failFast() {
+        return throwable -> {
+            if (throwable instanceof NoSuchElementException
+                    || throwable instanceof IllegalArgumentException
+                    || throwable instanceof AccessDeniedException) {
+                throw (RuntimeException) throwable;
+            }
+            throw new ServiceUnavailableException(CIRCUIT, throwable);
+        };
     }
 }

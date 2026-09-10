@@ -29,6 +29,12 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-gateway</artifactId>
         </dependency>
+        <!-- Redis : magasin des compteurs de RequestRateLimiter. Le gateway en
+             depend des lors qu'une route est limitee. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
         <!-- Client Eureka : le service s'enregistre au demarrage et l'apigateway
              le resout ensuite par son spring.application.name. -->
         <dependency>
@@ -54,6 +60,14 @@
                 </exclusion>
             </exclusions>
         </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.zipkin.reporter2</groupId>
+            <artifactId>zipkin-reporter-brave</artifactId>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
@@ -65,6 +79,8 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Tracing distribue : un identifiant de trace commun traverse le gateway et
+                 les services, et se retrouve dans chaque ligne de log. -->
         </dependencies>
     </dependencyManagement>
 

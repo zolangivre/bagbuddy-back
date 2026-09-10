@@ -8,19 +8,24 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.List;
 import java.util.NoSuchElementException;
 
 @Service
+// Lectures en readOnly par defaut : Hibernate n'garde pas de snapshot de
+// dirty-checking et ne flushe pas. Chaque methode d'ecriture porte son propre
+// @Transactional, qui surcharge ce defaut.
+@Transactional(readOnly = true)
 public class ReviewService {
 
-    @Autowired
-    private ReviewRepository reviewRepository;
+    private final ReviewRepository reviewRepository;
+    private final TransactionClient transactionClient;
 
-    @Autowired
-    private TransactionClient transactionClient;
+    public ReviewService(ReviewRepository reviewRepository, TransactionClient transactionClient) {
+        this.reviewRepository = reviewRepository;
+        this.transactionClient = transactionClient;
+    }
 
     public List<Review> getAll() {
         return reviewRepository.findAll();
@@ -59,13 +64,16 @@ public class ReviewService {
         if (body.getTransactionId() == null) {
             throw new IllegalArgumentException("transactionId is required");
         }
+        // Garde-fou local d'abord : un double-clic depuis le front n'a pas a payer l'aller-retour
+        // vers transactionservice. La recherche est cadree sur le sub de l'appelant, donc elle
+        // ne revele rien qu'il ne sache deja sur ses propres avis.
+        if (reviewRepository.existsByReviewerIdAndTransactionId(reviewerId, body.getTransactionId())) {
+            throw new IllegalArgumentException("This transaction has already been reviewed");
+        }
         TransactionSnapshot tx = transactionClient.fetchAsCaller(body.getTransactionId(), caller.getTokenValue());
         String counterpart = tx == null ? null : tx.counterpartOf(reviewerId);
         if (counterpart == null) {
             throw new AccessDeniedException("Caller is not a party to transaction " + body.getTransactionId());
-        }
-        if (reviewRepository.existsByReviewerIdAndTransactionId(reviewerId, body.getTransactionId())) {
-            throw new IllegalArgumentException("This transaction has already been reviewed");
         }
 
         Review review = new Review();
