@@ -162,4 +162,4 @@ The local Keycloak realm (`bagbuddy` realm; `bagbuddy-web` is public with the **
 
 ### Deployment
 
-Each service has a `Procfile` and `system.properties` (Heroku buildpack config) alongside its `Dockerfile` — this backend has historically been deployed to Heroku (see hardcoded `*.herokuapp.com` hostnames mentioned above), separate from the Docker Compose path used for local dev.
+The Heroku path is gone. It had stopped working long before it was removed: the six `.github/workflows/deploy-*.yml` triggered only on a `cd/back` branch that no longer exists, and they passed `usedocker: true`, which builds from each `Dockerfile` and ignores the `Procfile` / `system.properties` entirely. Deployment today is the `Dockerfile` in each service; there is no CI in this repo.

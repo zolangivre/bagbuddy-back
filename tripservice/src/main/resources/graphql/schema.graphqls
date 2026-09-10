@@ -6,12 +6,12 @@ scalar BigDecimal
 
 type Query {
     "Toutes les annonces, les plus recentes d'abord."
-    trips: [Trip!]!
+    trips(limit: Int, offset: Int): [Trip!]!
 
     "Annonces encore reservables : capacite restante > 0 et depart dans le futur."
-    activeTrips: [Trip!]!
+    activeTrips(limit: Int, offset: Int): [Trip!]!
 
-    inactiveTrips: [Trip!]!
+    inactiveTrips(limit: Int, offset: Int): [Trip!]!
 
     trip(id: ID!): Trip!
 
@@ -79,7 +79,6 @@ input TripInput {
     departureDate: DateTime
     arrivalDate: DateTime
     totalWeightAvailable: BigDecimal
-    remainingWeight: BigDecimal
     pricePerKg: BigDecimal
     conditions: String
     stripeAccountId: String

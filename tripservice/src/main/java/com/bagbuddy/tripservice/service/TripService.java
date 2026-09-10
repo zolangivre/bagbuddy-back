@@ -27,8 +27,17 @@ public class TripService {
         this.tripRepository = tripRepository;
     }
 
-    public List<Trip> getAllTrips() {
-        return tripRepository.findAllByOrderByCreatedAtDesc();
+    /** Plafond dur : une lecture non filtree ne doit jamais pouvoir ramener toute la table. */
+    public static final int MAX_PAGE = 200;
+
+    /** limit/offset optionnels ; sans eux la page vaut MAX_PAGE. */
+    private static PageRequest page(Integer limit, Integer offset) {
+        int size = limit == null ? MAX_PAGE : Math.clamp(limit, 1, MAX_PAGE);
+        return PageRequest.of(offset == null ? 0 : Math.max(offset, 0) / size, size);
+    }
+
+    public List<Trip> getAllTrips(Integer limit, Integer offset) {
+        return tripRepository.findAllByOrderByCreatedAtDesc(page(limit, offset));
     }
 
     /**
@@ -36,12 +45,12 @@ public class TripService {
      * table avant d'ecarter les lignes en Java, ce qui ne tient pas passe quelques
      * centaines d'annonces.
      */
-    public List<Trip> getActiveTrips() {
-        return tripRepository.findActive(LocalDateTime.now());
+    public List<Trip> getActiveTrips(Integer limit, Integer offset) {
+        return tripRepository.findActive(LocalDateTime.now(), page(limit, offset));
     }
 
-    public List<Trip> getInactiveTrips() {
-        return tripRepository.findInactive(LocalDateTime.now());
+    public List<Trip> getInactiveTrips(Integer limit, Integer offset) {
+        return tripRepository.findInactive(LocalDateTime.now(), page(limit, offset));
     }
 
     private boolean isActive(Trip trip) {
@@ -68,6 +77,10 @@ public class TripService {
         trip.setUserId(CallerIdentity.subOf(caller));
         trip.setUserInfo(CallerIdentity.fromToken(caller, trip.getUserInfo()));
 
+        // L'inventaire est decide par le serveur : une annonce neuve a toute sa capacite
+        // disponible. Le client ne nomme jamais remainingWeight, il n'est pas dans TripInput.
+        trip.setRemainingWeight(trip.getTotalWeightAvailable());
+
         // 'active' n'est pas calcule ici : TripListener le recalcule en @PrePersist et
         // ecraserait la valeur. Une seule formule, un seul endroit.
         return tripRepository.save(trip);
@@ -82,14 +95,31 @@ public class TripService {
         existingTrip.setArrivalAirport(tripDetails.getArrivalAirport());
         existingTrip.setDepartureDate(tripDetails.getDepartureDate());
         existingTrip.setArrivalDate(tripDetails.getArrivalDate());
+        // La capacite restante suit la capacite totale par difference : agrandir l'annonce
+        // ajoute autant de disponible, la reduire en retire autant. Le vendeur ne peut donc
+        // pas se recrediter le poids deja vendu en nommant directement remainingWeight --
+        // ce que le row lock de reserveCapacity() defend par ailleurs.
+        existingTrip.setRemainingWeight(
+                shiftedRemaining(existingTrip, tripDetails.getTotalWeightAvailable()));
         existingTrip.setTotalWeightAvailable(tripDetails.getTotalWeightAvailable());
-        existingTrip.setRemainingWeight(tripDetails.getRemainingWeight());
         existingTrip.setPricePerKg(tripDetails.getPricePerKg());
         existingTrip.setConditions(tripDetails.getConditions());
         existingTrip.setStripeAccountId(tripDetails.getStripeAccountId());
 
         // userId / userInfo are deliberately not copied: ownership is immutable.
         return tripRepository.save(existingTrip);
+    }
+
+    @Transactional
+    /** Reporte sur la capacite restante la variation de la capacite totale, sans passer sous zero. */
+    private static BigDecimal shiftedRemaining(Trip existing, BigDecimal newTotal) {
+        BigDecimal oldTotal = existing.getTotalWeightAvailable();
+        BigDecimal remaining = existing.getRemainingWeight();
+        if (newTotal == null || oldTotal == null || remaining == null) {
+            return newTotal;
+        }
+        BigDecimal shifted = remaining.add(newTotal.subtract(oldTotal));
+        return shifted.max(BigDecimal.ZERO).min(newTotal);
     }
 
     @Transactional

@@ -54,13 +54,6 @@ public class TransactionGraphQlController {
     }
 
     @QueryMapping
-    public List<TransactionView> transactionsByUser(@Argument String userId,
-                                                    @AuthenticationPrincipal Jwt jwt) {
-        requireSelf(userId, jwt);
-        return TransactionView.of(transactionService.getByUser(userId));
-    }
-
-    @QueryMapping
     public Long transactionCount(@Argument String userId, @AuthenticationPrincipal Jwt jwt) {
         requireSelf(userId, jwt);
         return transactionService.countByUser(userId);

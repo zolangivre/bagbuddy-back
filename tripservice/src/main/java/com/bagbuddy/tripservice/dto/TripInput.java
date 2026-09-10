@@ -9,7 +9,7 @@ import java.time.LocalDateTime;
 /**
  * Entree de createTrip / updateTrip. Ce que le schema n'expose pas ne peut pas etre ecrit :
  * ni userId, ni l'identite de l'instantane (elle vient du jeton), ni active (calcule par
- * TripListener). C'est la meme regle qu'en REST, mais rendue explicite par le type.
+ * TripListener), ni remainingWeight (l'inventaire est decide par le serveur : voir TripService). C'est la meme regle qu'en REST, mais rendue explicite par le type.
  */
 public record TripInput(
         String departureAirport,
@@ -17,7 +17,6 @@ public record TripInput(
         LocalDateTime departureDate,
         LocalDateTime arrivalDate,
         BigDecimal totalWeightAvailable,
-        BigDecimal remainingWeight,
         BigDecimal pricePerKg,
         String conditions,
         String stripeAccountId,
@@ -35,7 +34,6 @@ public record TripInput(
         trip.setDepartureDate(departureDate);
         trip.setArrivalDate(arrivalDate);
         trip.setTotalWeightAvailable(totalWeightAvailable);
-        trip.setRemainingWeight(remainingWeight);
         trip.setPricePerKg(pricePerKg);
         trip.setConditions(conditions);
         trip.setStripeAccountId(stripeAccountId);

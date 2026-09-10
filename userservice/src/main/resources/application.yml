@@ -119,3 +119,29 @@ management:
       show-details: when-authorized
       probes:
         enabled: true
+
+# --- Appels sortants ---
+# Keycloak est sur le chemin de 'register', la seule operation anonyme du systeme :
+# sans delais explicites, un Keycloak muet retient les threads de requete sur ce
+# chemin precis, celui qu'un appelant non authentifie peut atteindre.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      keycloak:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un identifiant deja pris ou un mot de passe faux sont des reponses,
+        # pas des pannes : les compter ouvrirait le circuit sans raison.
+        ignore-exceptions:
+          - com.bagbuddy.userservice.web.AccountException
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException

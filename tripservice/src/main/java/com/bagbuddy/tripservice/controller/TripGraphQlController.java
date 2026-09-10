@@ -30,18 +30,21 @@ public class TripGraphQlController {
     }
 
     @QueryMapping
-    public List<TripResponse> trips(@AuthenticationPrincipal Jwt jwt) {
-        return TripResponse.of(tripService.getAllTrips(), CallerIdentity.subOf(jwt));
+    public List<TripResponse> trips(@Argument Integer limit, @Argument Integer offset,
+                                        @AuthenticationPrincipal Jwt jwt) {
+        return TripResponse.of(tripService.getAllTrips(limit, offset), CallerIdentity.subOf(jwt));
     }
 
     @QueryMapping
-    public List<TripResponse> activeTrips(@AuthenticationPrincipal Jwt jwt) {
-        return TripResponse.of(tripService.getActiveTrips(), CallerIdentity.subOf(jwt));
+    public List<TripResponse> activeTrips(@Argument Integer limit, @Argument Integer offset,
+                                        @AuthenticationPrincipal Jwt jwt) {
+        return TripResponse.of(tripService.getActiveTrips(limit, offset), CallerIdentity.subOf(jwt));
     }
 
     @QueryMapping
-    public List<TripResponse> inactiveTrips(@AuthenticationPrincipal Jwt jwt) {
-        return TripResponse.of(tripService.getInactiveTrips(), CallerIdentity.subOf(jwt));
+    public List<TripResponse> inactiveTrips(@Argument Integer limit, @Argument Integer offset,
+                                        @AuthenticationPrincipal Jwt jwt) {
+        return TripResponse.of(tripService.getInactiveTrips(limit, offset), CallerIdentity.subOf(jwt));
     }
 
     @QueryMapping

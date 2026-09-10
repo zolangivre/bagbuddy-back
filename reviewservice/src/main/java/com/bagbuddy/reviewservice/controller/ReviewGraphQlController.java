@@ -24,8 +24,8 @@ public class ReviewGraphQlController {
     }
 
     @QueryMapping
-    public List<Review> reviews() {
-        return reviewService.getAll();
+    public List<Review> reviews(@Argument Integer limit, @Argument Integer offset) {
+        return reviewService.getAll(limit, offset);
     }
 
     @QueryMapping

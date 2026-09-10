@@ -152,6 +152,27 @@ class TripSecurityTest {
     }
 
     @Test
+    void remainingWeightCannotBeSetByTheClient() throws Exception {
+        // L'inventaire est decide par le serveur : le champ n'existe pas dans TripInput,
+        // donc le schema refuse la requete au lieu de l'ignorer en silence.
+        Map<String, Object> input = Map.of(
+                "departureAirport", "CDG",
+                "arrivalAirport", "JFK",
+                "departureDate", LocalDateTime.now().plusDays(5).toString(),
+                "arrivalDate", LocalDateTime.now().plusDays(6).toString(),
+                "totalWeightAvailable", 10,
+                "remainingWeight", 999,
+                "pricePerKg", 5);
+
+        mockMvc.perform(graphql("""
+                        mutation($input: TripInput!) { createTrip(input: $input) { id } }
+                        """, Map.of("input", input))
+                        .with(jwt().jwt(j -> j.subject(BOB))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("ValidationError"));
+    }
+
+    @Test
     void ownershipComesFromTheTokenNotTheRequestBody() throws Exception {
         Map<String, Object> input = Map.of(
                 "departureAirport", "CDG",
@@ -159,7 +180,6 @@ class TripSecurityTest {
                 "departureDate", LocalDateTime.now().plusDays(5).toString(),
                 "arrivalDate", LocalDateTime.now().plusDays(6).toString(),
                 "totalWeightAvailable", 10,
-                "remainingWeight", 10,
                 "pricePerKg", 5,
                 "profile", Map.of("phone", "+000"));
 

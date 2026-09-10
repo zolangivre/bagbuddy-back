@@ -14,7 +14,6 @@ type Query {
     "Reserve a l'interesse lui-meme : un vendeur ne lit pas les ventes d'un autre."
     transactionsBySeller(sellerId: String!): [Transaction!]!
     transactionsByBuyer(buyerId: String!): [Transaction!]!
-    transactionsByUser(userId: String!): [Transaction!]!
     transactionCount(userId: String!): Long!
 
     "Somme des transactions terminees des deux cotes."

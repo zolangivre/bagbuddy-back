@@ -29,6 +29,15 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
 
     @Override
     protected GraphQLError resolveToSingleError(Throwable ex, DataFetchingEnvironment env) {
+        if (ex instanceof ServiceUnavailableException unavailable) {
+            // Classification INTERNAL_ERROR : ce n'est pas la faute de l'appelant.
+            // Le code, lui, dit que reessayer a un sens.
+            return GraphqlErrorBuilder.newError(env)
+                    .errorType(ErrorType.INTERNAL_ERROR)
+                    .message("Service momentanement indisponible : " + unavailable.getService())
+                    .extensions(Map.of("code", "service_unavailable"))
+                    .build();
+        }
         if (ex instanceof AccountException account) {
             // Le code est le contrat : le front s'appuie dessus, pas sur le libelle.
             return GraphqlErrorBuilder.newError(env)

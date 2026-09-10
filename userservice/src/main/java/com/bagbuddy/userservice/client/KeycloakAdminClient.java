@@ -1,9 +1,11 @@
 package com.bagbuddy.userservice.client;
 
 import com.bagbuddy.userservice.web.AccountException;
+import com.bagbuddy.userservice.web.ServiceUnavailableException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -15,6 +17,9 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Keycloak's admin API, reached with the {@code bagbuddy-accounts} service account.
@@ -29,23 +34,78 @@ public class KeycloakAdminClient {
 
     private final RestClient keycloak;
     private final ServiceTokenProvider tokenProvider;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
+    private final CircuitBreakerFactory<?, ?> circuitBreakerFactory;
     private final String realm;
     private final String loginClientId;
 
     public KeycloakAdminClient(RestClient.Builder builder,
                                ServiceTokenProvider tokenProvider,
+                               ObjectMapper objectMapper,
+                               CircuitBreakerFactory<?, ?> circuitBreakerFactory,
                                @Value("${bagbuddy.keycloak.base-url}") String baseUrl,
                                @Value("${bagbuddy.keycloak.realm}") String realm,
                                @Value("${bagbuddy.keycloak.login-client-id}") String loginClientId) {
         this.keycloak = builder.baseUrl(baseUrl).build();
         this.tokenProvider = tokenProvider;
+        this.objectMapper = objectMapper;
+        this.circuitBreakerFactory = circuitBreakerFactory;
         this.realm = realm;
         this.loginClientId = loginClientId;
     }
 
+
+    private static final String CIRCUIT = "keycloak";
+
     /** Creates an enabled user with a permanent password. The email doubles as the username. */
     public void createUser(String email, String firstName, String lastName, String password) {
+        run(() -> {
+            createUserInternal(email, firstName, lastName, password);
+            return null;
+        });
+    }
+
+    public void updateIdentity(String userId, String email, String firstName, String lastName,
+                               boolean emailChanged) {
+        run(() -> {
+            updateIdentityInternal(userId, email, firstName, lastName, emailChanged);
+            return null;
+        });
+    }
+
+    public void resetPassword(String userId, String password) {
+        run(() -> {
+            resetPasswordInternal(userId, password);
+            return null;
+        });
+    }
+
+    public boolean passwordMatches(String username, String password) {
+        return run(() -> passwordMatchesInternal(username, password));
+    }
+
+    private <T> T run(Supplier<T> call) {
+        return circuitBreakerFactory.create(CIRCUIT).run(call, failFast());
+    }
+
+    /**
+     * Aucun repli n'invente de reponse : un compte n'est pas cree, ni un mot de passe valide,
+     * parce que Keycloak n'a pas repondu. Les issues metier passent telles quelles ; le reste
+     * devient une indisponibilite explicite, que le client peut reessayer.
+     */
+    private static <T> Function<Throwable, T> failFast() {
+        return throwable -> {
+            if (throwable instanceof AccountException
+                    || throwable instanceof NoSuchElementException
+                    || throwable instanceof IllegalArgumentException) {
+                throw (RuntimeException) throwable;
+            }
+            throw new ServiceUnavailableException(CIRCUIT, throwable);
+        };
+    }
+
+    /** Creates an enabled user with a permanent password. The email doubles as the username. */
+    private void createUserInternal(String email, String firstName, String lastName, String password) {
         Map<String, Object> body = Map.of(
                 "username", email,
                 "email", email,
@@ -71,7 +131,7 @@ public class KeycloakAdminClient {
      * Updates the identity Keycloak owns. A new email resets {@code emailVerified}: nothing
      * has proved the new address belongs to the account holder.
      */
-    public void updateIdentity(String userId, String email, String firstName, String lastName,
+    private void updateIdentityInternal(String userId, String email, String firstName, String lastName,
                                boolean emailChanged) {
         Map<String, Object> body = emailChanged
                 ? Map.of("username", email, "email", email, "emailVerified", false,
@@ -90,7 +150,7 @@ public class KeycloakAdminClient {
         }
     }
 
-    public void resetPassword(String userId, String password) {
+    private void resetPasswordInternal(String userId, String password) {
         try {
             keycloak.put()
                     .uri("/admin/realms/{realm}/users/{id}/reset-password", realm, userId)
@@ -109,7 +169,7 @@ public class KeycloakAdminClient {
      * that verifies a password, and we would not want one: this way the realm's own brute
      * force protection sees the attempt.
      */
-    public boolean passwordMatches(String username, String password) {
+    private boolean passwordMatchesInternal(String username, String password) {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("grant_type", "password");
         form.add("client_id", loginClientId);

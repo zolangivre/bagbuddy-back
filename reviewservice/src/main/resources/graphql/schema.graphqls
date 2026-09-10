@@ -4,7 +4,11 @@
 scalar DateTime
 
 type Query {
-    reviews: [Review!]!
+    """
+    limit/offset optionnels. Sans eux la reponse reste plafonnee a 200 elements :
+    la table entiere n'est jamais servie d'un coup.
+    """
+    reviews(limit: Int, offset: Int): [Review!]!
     review(id: ID!): Review!
     reviewsByReviewee(revieweeId: String!): [Review!]!
     reviewsByReviewer(reviewerId: String!): [Review!]!

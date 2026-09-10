@@ -6,6 +6,8 @@ import com.bagbuddy.reviewservice.model.Review;
 import com.bagbuddy.reviewservice.repository.ReviewRepository;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,8 +29,14 @@ public class ReviewService {
         this.transactionClient = transactionClient;
     }
 
-    public List<Review> getAll() {
-        return reviewRepository.findAll();
+    /** Plafond dur : une lecture non filtree ne doit jamais pouvoir ramener toute la table. */
+    public static final int MAX_PAGE = 200;
+
+    public List<Review> getAll(Integer limit, Integer offset) {
+        int size = limit == null ? MAX_PAGE : Math.clamp(limit, 1, MAX_PAGE);
+        int page = offset == null ? 0 : Math.max(offset, 0) / size;
+        return reviewRepository.findAll(PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt")))
+                .getContent();
     }
 
     public Review getOne(Long id) {

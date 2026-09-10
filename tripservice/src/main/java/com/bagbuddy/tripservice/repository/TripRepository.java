@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Optional;
 
 public interface TripRepository extends JpaRepository<Trip, Long> {
-    List<Trip> findAllByOrderByCreatedAtDesc();
+    List<Trip> findAllByOrderByCreatedAtDesc(Pageable pageable);
 
     List<Trip> findAllByUserIdOrderByCreatedAtDesc(String userId);
 
@@ -25,7 +25,7 @@ public interface TripRepository extends JpaRepository<Trip, Long> {
      */
     @Query("select t from Trip t where t.remainingWeight > 0 and t.departureDate > :now "
             + "order by t.createdAt desc")
-    List<Trip> findActive(@Param("now") LocalDateTime now);
+    List<Trip> findActive(@Param("now") LocalDateTime now, Pageable pageable);
 
     /**
      * Le complement exact de findActive, valeurs nulles comprises : une annonce
@@ -33,7 +33,7 @@ public interface TripRepository extends JpaRepository<Trip, Long> {
      */
     @Query("select t from Trip t where t.remainingWeight is null or t.remainingWeight <= 0 "
             + "or t.departureDate is null or t.departureDate <= :now order by t.createdAt desc")
-    List<Trip> findInactive(@Param("now") LocalDateTime now);
+    List<Trip> findInactive(@Param("now") LocalDateTime now, Pageable pageable);
 
     /**
      * Projection d'une seule colonne, la plus recente d'abord : lire le compte de paiement
