@@ -10,6 +10,14 @@
 	@internal path /trips/internal/* /transactions/internal/*
 	respond @internal 404
 
+	# L'actuator de la gateway n'a aucune securite devant lui : /actuator/prometheus y detaille
+	# le trafic et l'infrastructure. Seule la sonde de sante reste joignable de l'exterieur.
+	@actuator {
+		path /actuator /actuator/*
+		not path /actuator/health /actuator/health/*
+	}
+	respond @actuator 404
+
 	# /stripe/webhook passe par la gateway comme le reste : c'est l'URL a declarer chez Stripe.
 	reverse_proxy api-gateway:8080
 }

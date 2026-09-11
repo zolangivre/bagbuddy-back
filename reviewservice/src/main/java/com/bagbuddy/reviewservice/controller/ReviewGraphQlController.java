@@ -34,13 +34,15 @@ public class ReviewGraphQlController {
     }
 
     @QueryMapping
-    public List<Review> reviewsByReviewee(@Argument String revieweeId) {
-        return reviewService.byReviewee(revieweeId);
+    public List<Review> reviewsByReviewee(@Argument String revieweeId,
+                                          @Argument Integer limit, @Argument Integer offset) {
+        return reviewService.byReviewee(revieweeId, limit, offset);
     }
 
     @QueryMapping
-    public List<Review> reviewsByReviewer(@Argument String reviewerId) {
-        return reviewService.byReviewer(reviewerId);
+    public List<Review> reviewsByReviewer(@Argument String reviewerId,
+                                          @Argument Integer limit, @Argument Integer offset) {
+        return reviewService.byReviewer(reviewerId, limit, offset);
     }
 
     @QueryMapping

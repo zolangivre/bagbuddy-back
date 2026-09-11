@@ -10,8 +10,9 @@ type Query {
     """
     reviews(limit: Int, offset: Int): [Review!]!
     review(id: ID!): Review!
-    reviewsByReviewee(revieweeId: String!): [Review!]!
-    reviewsByReviewer(reviewerId: String!): [Review!]!
+    "Les plus recents d'abord. limit/offset optionnels, 200 elements au plus par page."
+    reviewsByReviewee(revieweeId: String!, limit: Int, offset: Int): [Review!]!
+    reviewsByReviewer(reviewerId: String!, limit: Int, offset: Int): [Review!]!
     reviewsByTransaction(transactionId: ID!): [Review!]!
 
     "Moyenne des notes recues. Null tant que le membre n'a recu aucun avis."

@@ -13,9 +13,10 @@ import java.util.List;
 import java.util.Optional;
 
 public interface TripRepository extends JpaRepository<Trip, Long> {
-    List<Trip> findAllByOrderByCreatedAtDesc(Pageable pageable);
+    /** id en second critere : a created_at egal, l'ordre doit rester le meme d'une page a l'autre. */
+    List<Trip> findAllByOrderByCreatedAtDescIdDesc(Pageable pageable);
 
-    List<Trip> findAllByUserIdOrderByCreatedAtDesc(String userId);
+    List<Trip> findAllByUserIdOrderByCreatedAtDescIdDesc(String userId, Pageable pageable);
 
     /**
      * Annonces encore reservables. Le predicat reprend exactement celui du domaine
@@ -24,7 +25,7 @@ public interface TripRepository extends JpaRepository<Trip, Long> {
      * depart est passee sans que la ligne ait bouge.
      */
     @Query("select t from Trip t where t.remainingWeight > 0 and t.departureDate > :now "
-            + "order by t.createdAt desc")
+            + "order by t.createdAt desc, t.id desc")
     List<Trip> findActive(@Param("now") LocalDateTime now, Pageable pageable);
 
     /**
@@ -32,7 +33,7 @@ public interface TripRepository extends JpaRepository<Trip, Long> {
      * incomplete doit apparaitre ici plutot que de disparaitre des deux listes.
      */
     @Query("select t from Trip t where t.remainingWeight is null or t.remainingWeight <= 0 "
-            + "or t.departureDate is null or t.departureDate <= :now order by t.createdAt desc")
+            + "or t.departureDate is null or t.departureDate <= :now order by t.createdAt desc, t.id desc")
     List<Trip> findInactive(@Param("now") LocalDateTime now, Pageable pageable);
 
     /**

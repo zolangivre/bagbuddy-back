@@ -1,26 +1,37 @@
+# syntax=docker/dockerfile:1
 FROM maven:3.9.11-eclipse-temurin-21-alpine AS build
 
 WORKDIR /app
 
-# Copier d'abord le pom.xml seul pour profiter du cache Docker
 COPY pom.xml ./
-
-# Télécharger les dépendances (sera mis en cache si pom.xml ne change pas)
-RUN mvn dependency:go-offline -B || mvn dependency:resolve -B
-
-# Copier le code source
 COPY src ./src
 
-# Builder avec plus d'options pour gérer les timeouts
-RUN mvn clean package -DskipTests -B \
-    -Dmaven.wagon.http.retryHandler.count=3 \
-    -Dmaven.wagon.httpconnectionManager.ttlSeconds=120
+# Cache Maven conserve d'un build a l'autre : sans lui, chaque --build retelechargeait toutes
+# les dependances, ce qui se sent sur la VM.
+RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests
+
+# Jar eclate (application + lib/) : c'est la forme dont la JVM sait archiver les classes.
+RUN java -Djarmode=tools -jar target/eurekaserver-0.0.1-SNAPSHOT.jar extract --destination /extracted
 
 FROM amazoncorretto:21-alpine
 
 WORKDIR /app
-COPY --from=build /app/target/eurekaserver-0.0.1-SNAPSHOT.jar ./
+
+COPY --from=build /extracted/ ./
+
+# AppCDS : un demarrage d'entrainement jusqu'au rafraichissement du contexte, dont la JVM archive
+# les classes chargees. Les demarrages suivants les relisent au lieu de les reanalyser, soit
+# nettement moins de CPU au boot -- ce qui compte quand huit JVM partagent deux coeurs.
+# Le client Eureka reste actif ici : le serveur en a besoin, et il ne joint personne
+# (register-with-eureka et fetch-registry sont a false).
+# Un echec ne bloque pas l'image : elle demarre alors simplement sans archive.
+RUN java -XX:ArchiveClassesAtExit=app.jsa -Dspring.context.exit=onRefresh \
+         -Dmanagement.tracing.enabled=false \
+         -jar eurekaserver-0.0.1-SNAPSHOT.jar > /tmp/cds-training.log 2>&1 \
+    || { echo "CDS training failed, the image will start without a class archive:"; \
+         grep -E "APPLICATION FAILED|Caused by|Description:|Exception" /tmp/cds-training.log | head -20; \
+         rm -f app.jsa; }
 
 EXPOSE 8761
 
-CMD [ "java", "-jar", "eurekaserver-0.0.1-SNAPSHOT.jar"]
+CMD [ "java", "-XX:SharedArchiveFile=app.jsa", "-Xshare:auto", "-jar", "eurekaserver-0.0.1-SNAPSHOT.jar"]

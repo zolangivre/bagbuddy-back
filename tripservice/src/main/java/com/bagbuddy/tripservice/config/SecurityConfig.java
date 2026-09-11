@@ -50,7 +50,7 @@ public class SecurityConfig {
                         // forward vers /error repasse par la chaine de securite, qui ne
                         // voit plus de jeton sur la requete interne.
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
-                        .requestMatchers("/actuator/health/**").permitAll()
+                        .requestMatchers("/actuator/health/**", "/actuator/prometheus").permitAll()
                         // Console GraphiQL : page statique, sans donnees. Les requetes
                         // qu'elle emet passent par /trips/graphql et restent authentifiees.
                         .requestMatchers("/trips/graphiql/**").permitAll()

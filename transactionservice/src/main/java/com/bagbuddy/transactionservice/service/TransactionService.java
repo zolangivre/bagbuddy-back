@@ -5,13 +5,18 @@ import com.bagbuddy.transactionservice.client.TripSnapshot;
 import com.bagbuddy.transactionservice.model.ListingInfo;
 import com.bagbuddy.transactionservice.model.Transaction;
 import com.bagbuddy.transactionservice.model.UserInfo;
+import com.bagbuddy.transactionservice.notification.TransactionStatusChanged;
 import com.bagbuddy.transactionservice.repository.TransactionRepository;
 import com.bagbuddy.transactionservice.security.CallerIdentity;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Actor;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Effect;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.StatusPair;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Transition;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
@@ -22,6 +27,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.NoSuchElementException;
 
@@ -32,20 +38,33 @@ import java.util.NoSuchElementException;
 @Transactional(readOnly = true)
 public class TransactionService {
 
+    private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
+
     private final TransactionRepository transactionRepository;
     private final TripClient tripClient;
     private final TransactionStateMachine stateMachine;
     /** Ecriture programmatique : la phase d'ecriture de update() ne peut pas passer par le proxy. */
     private final TransactionTemplate writeTx;
+    /**
+     * Notifications : l'evenement est publie dans la transaction d'ecriture et traite apres son
+     * commit (TransactionNotifier), jamais pour une ecriture annulee.
+     */
+    private final ApplicationEventPublisher events;
+    /** Echecs de restitution de capacite : du poids pris sur une annonce que personne ne tient plus. */
+    private final MeterRegistry meters;
 
     public TransactionService(TransactionRepository transactionRepository,
                               TripClient tripClient,
                               TransactionStateMachine stateMachine,
-                              TransactionTemplate writeTx) {
+                              TransactionTemplate writeTx,
+                              ApplicationEventPublisher events,
+                              MeterRegistry meters) {
         this.transactionRepository = transactionRepository;
         this.tripClient = tripClient;
         this.stateMachine = stateMachine;
         this.writeTx = writeTx;
+        this.events = events;
+        this.meters = meters;
     }
 
     /**
@@ -111,7 +130,9 @@ public class TransactionService {
         if (buyerId.equals(trip.getUserId())) {
             throw new IllegalArgumentException("A traveller cannot book their own listing");
         }
-        if (!Boolean.TRUE.equals(trip.getActive())) {
+        // Recalcule plutot que lu dans trip.active : cette colonne n'est remise a jour qu'a
+        // l'ecriture de l'annonce, et reste vraie apres le depart tant que personne n'y touche.
+        if (!isBookable(trip)) {
             throw new IllegalArgumentException("Listing is no longer available");
         }
         if (trip.getPricePerKg() == null) {
@@ -136,7 +157,9 @@ public class TransactionService {
         tx.setBuyerReview(false);
         tx.setSellerReview(false);
         // Payment fields are only ever written by the Stripe webhook (markPaid).
-        return transactionRepository.save(tx);
+        Transaction saved = transactionRepository.save(tx);
+        events.publishEvent(TransactionStatusChanged.of(saved, Actor.BUYER));
+        return saved;
     }
 
     /**
@@ -158,18 +181,75 @@ public class TransactionService {
 
         // --- Phase 2 : appels a tripservice, aucune connexion DB retenue pendant l'attente.
         Repricing repricing = null;
+        BigDecimal reservedWeight = null;
         if (planned != null) {
             switch (planned.effect()) {
                 case REPRICE -> repricing = quote(snapshot.getListingId(), body.getWeight());
-                case RESERVE_CAPACITY -> reserveCapacity(snapshot.getListingId(), snapshot.getWeight());
-                case SETTLE_PAYMENT, NONE -> { }
+                case RESERVE_CAPACITY -> {
+                    reserveCapacity(snapshot.getListingId(), snapshot.getWeight(), id);
+                    reservedWeight = snapshot.getWeight();
+                }
+                // Rendre le poids attend que l'annulation soit ecrite (phase 4) : rendu trop tot,
+                // il pourrait etre revendu alors que la transaction n'a finalement pas bouge.
+                case SETTLE_PAYMENT, RELEASE_CAPACITY, NONE -> { }
             }
         }
 
         // --- Phase 3 : ecriture courte, sous verrou de ligne.
         Effect expected = planned == null ? null : planned.effect();
         Repricing priced = repricing;
-        return writeTx.execute(status -> applyUpdate(id, body, callerSub, actor, expected, priced));
+        BigDecimal reserved = reservedWeight;
+        Transaction updated;
+        try {
+            updated = writeTx.execute(status ->
+                    applyUpdate(id, body, callerSub, actor, expected, priced, reserved));
+        } catch (RuntimeException ex) {
+            if (reserved != null) {
+                compensateReservation(id, snapshot.getListingId());
+            }
+            throw ex;
+        }
+
+        // --- Phase 4 : effets distants qui ne doivent suivre qu'une ecriture validee.
+        if (expected == Effect.RELEASE_CAPACITY
+                && stateMachine.cancelledPair().equals(pairOf(updated))) {
+            releaseCapacity(updated.getListingId(), id);
+        }
+        return updated;
+    }
+
+    /**
+     * Le poids a ete pris en phase 2 mais la transaction n'a pas ete acceptee : on le rend, sauf
+     * si entre-temps un autre appel a bel et bien fait passer la transaction dans un etat qui le
+     * detient (double-clic dont le premier clic a abouti, paiement deja arrive).
+     */
+    private void compensateReservation(Long id, Long listingId) {
+        try {
+            Transaction current = transactionRepository.findById(id).orElse(null);
+            if (current != null && stateMachine.holdsCapacity(pairOf(current))) {
+                return;
+            }
+            tripClient.release(listingId, id);
+        } catch (RuntimeException ex) {
+            log.error("Capacity reserved for transaction {} on listing {} could not be given back; "
+                    + "release it by replaying POST /trips/internal/{}/release", id, listingId, listingId, ex);
+            meters.counter("bagbuddy.capacity.release.failures", "cause", "compensation").increment();
+        }
+    }
+
+    /**
+     * Apres une annulation validee. Un echec ici laisse le poids pris -- la direction sure : une
+     * annonce qui affiche moins de place qu'elle n'en a, jamais l'inverse. L'appel est idempotent,
+     * le rejouer a la main suffit.
+     */
+    private void releaseCapacity(Long listingId, Long id) {
+        try {
+            tripClient.release(listingId, id);
+        } catch (RuntimeException ex) {
+            log.error("Transaction {} was cancelled but its capacity on listing {} was not given back; "
+                    + "replay POST /trips/internal/{}/release", id, listingId, listingId, ex);
+            meters.counter("bagbuddy.capacity.release.failures", "cause", "cancellation").increment();
+        }
     }
 
     /**
@@ -178,7 +258,8 @@ public class TransactionService {
      * correspondent plus a la transition et la mise a jour est refusee plutot qu'appliquee.
      */
     private Transaction applyUpdate(Long id, Transaction body, String callerSub,
-                                    Actor actor, Effect expected, Repricing repricing) {
+                                    Actor actor, Effect expected, Repricing repricing,
+                                    BigDecimal reservedWeight) {
         Transaction existing = transactionRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
         requireParticipant(existing, callerSub);
@@ -207,12 +288,85 @@ public class TransactionService {
                 existing.setTotal(repricing.total());
             }
             case SETTLE_PAYMENT -> settlePayment(existing);
-            case RESERVE_CAPACITY, NONE -> { }
+            case RESERVE_CAPACITY -> {
+                // Refusee puis re-tarifee entre la phase 1 et ici : le poids reserve n'est plus
+                // celui de la demande. On refuse, et la compensation rend ce qui a ete pris.
+                if (existing.getWeight() == null || existing.getWeight().compareTo(reservedWeight) != 0) {
+                    throw new IllegalStateException(
+                            "Transaction " + id + " changed while it was being updated; retry");
+                }
+            }
+            case RELEASE_CAPACITY, NONE -> { }
         }
 
         existing.setSellerStatus(to.sellerStatus());
         existing.setBuyerStatus(to.buyerStatus());
+        // Dans la transaction de writeTx : l'email ne part qu'une fois l'ecriture validee.
+        events.publishEvent(TransactionStatusChanged.of(existing, actor));
         return transactionRepository.save(existing);
+    }
+
+    /**
+     * Annule les demandes jamais payees dont le vol est deja parti : refusees, en attente de
+     * reponse, ou acceptees sans paiement. Sans cela elles restent a attendre une action que plus
+     * personne ne peut faire, et une acceptation garde son poids pris sur l'annonce -- ce qui
+     * interdit ensuite au voyageur de la supprimer.
+     *
+     * Chaque transaction est reprise sous verrou et revalidee : entre la selection et l'ecriture,
+     * l'acheteur a pu payer. Une par une, pour qu'un echec n'emporte pas le reste du lot.
+     *
+     * @return le nombre de transactions annulees
+     */
+    // Hors transaction, comme update() : sinon chaque ecriture de writeTx rejoindrait la transaction
+    // readOnly de la classe, et rien ne serait flushe.
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public int expireDepartedRequests() {
+        String now = LocalDateTime.now().truncatedTo(ChronoUnit.MINUTES).toString();
+        int expired = 0;
+        for (Long id : transactionRepository.findDepartedWithStatus(now, stateMachine.expirableKeys())) {
+            try {
+                if (expireOne(id, now)) {
+                    expired++;
+                }
+            } catch (RuntimeException ex) {
+                log.warn("Transaction {} could not be expired; it will be retried on the next run", id, ex);
+            }
+        }
+        if (expired > 0) {
+            meters.counter("bagbuddy.transaction.expired").increment(expired);
+            log.info("Expired {} unpaid transaction(s) whose flight has departed", expired);
+        }
+        return expired;
+    }
+
+    private record Expiry(Long listingId, boolean heldCapacity) { }
+
+    private boolean expireOne(Long id, String now) {
+        Expiry expiry = writeTx.execute(status -> {
+            Transaction tx = transactionRepository.findByIdForUpdate(id).orElse(null);
+            if (tx == null || !stateMachine.isExpirable(pairOf(tx))) {
+                return null;
+            }
+            String departure = tx.getListingInfo() == null ? null : tx.getListingInfo().getDepartureDate();
+            if (departure == null || departure.length() < 16 || departure.compareTo(now) >= 0) {
+                return null;
+            }
+            boolean held = stateMachine.holdsCapacity(pairOf(tx));
+            StatusPair cancelled = stateMachine.cancelledPair();
+            tx.setSellerStatus(cancelled.sellerStatus());
+            tx.setBuyerStatus(cancelled.buyerStatus());
+            // Aucun acteur : ni l'acheteur ni le vendeur n'a fait ce geste.
+            events.publishEvent(TransactionStatusChanged.of(tx, null));
+            transactionRepository.save(tx);
+            return new Expiry(tx.getListingId(), held);
+        });
+        if (expiry == null) {
+            return false;
+        }
+        if (expiry.heldCapacity()) {
+            releaseCapacity(expiry.listingId(), id);
+        }
+        return true;
     }
 
     private StatusPair pairOf(Transaction tx) {
@@ -246,10 +400,11 @@ public class TransactionService {
 
     /**
      * The seller accepting is the commitment point, so this is where the weight leaves the
-     * listing -- decided by tripservice under a row lock, never by the caller.
+     * listing -- decided by tripservice under a row lock, never by the caller. The reservation is
+     * keyed by the transaction, so a second "accept" does not take the weight again.
      */
-    private void reserveCapacity(Long listingId, BigDecimal weight) {
-        TripSnapshot reserved = tripClient.reserve(listingId, weight);
+    private void reserveCapacity(Long listingId, BigDecimal weight, Long transactionId) {
+        TripSnapshot reserved = tripClient.reserve(listingId, weight, transactionId);
         if (reserved == null) {
             throw new IllegalStateException(
                     "Capacity reservation returned nothing for listing " + listingId);
@@ -313,7 +468,21 @@ public class TransactionService {
     public void delete(Long id, String callerSub) {
         Transaction tx = findOrThrow(id);
         requireParticipant(tx, callerSub);
+        // Acceptee ou payee, la transaction tient du poids sur l'annonce, et peut-etre l'argent de
+        // l'acheteur : la supprimer effacerait l'engagement sans rien rendre. On annule d'abord.
+        if (stateMachine.holdsCapacity(pairOf(tx)) && !stateMachine.isCompleted(pairOf(tx))) {
+            throw new IllegalArgumentException(
+                    "An accepted or paid transaction must be cancelled before it can be deleted");
+        }
         transactionRepository.delete(tx);
+    }
+
+    /** Meme formule que TripListener, appliquee a l'instant de la reservation. */
+    private static boolean isBookable(TripSnapshot trip) {
+        return trip.getRemainingWeight() != null
+                && trip.getRemainingWeight().compareTo(BigDecimal.ZERO) > 0
+                && trip.getDepartureDate() != null
+                && trip.getDepartureDate().isAfter(LocalDateTime.now());
     }
 
     private Transaction findOrThrow(Long id) {

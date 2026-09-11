@@ -45,6 +45,20 @@ type Mutation {
     deja utilise, ou envoye a une adresse que le compte n'a plus : code invalid_reset_token.
     """
     resetPassword(input: ResetPasswordInput!): Boolean!
+
+    """
+    Envoie un lien de verification a l'adresse actuelle du compte de l'appelant (en ou fr).
+    false si elle est deja verifiee. Au plus un email par minute : code
+    verification_email_throttled au-dela.
+    """
+    sendVerificationEmail(language: String): Boolean!
+
+    """
+    Marque l'adresse verifiee a partir du jeton du lien, sans jeton d'acces : le lien s'ouvre
+    souvent sur un autre appareil. Lien inconnu, expire, deja utilise, ou envoye a une adresse
+    que le compte n'a plus : code invalid_verification_token.
+    """
+    verifyEmail(token: String!): Boolean!
 }
 
 "Profil complet. N'est jamais renvoye qu'a son proprietaire."

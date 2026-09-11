@@ -2,6 +2,14 @@ spring:
   application:
     name: transaction-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
   # --- GraphQL ---
   # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
   # de chemin (Path=/transactions/**) sans reecriture, et un appel direct au conteneur emprunte
@@ -17,6 +25,15 @@ spring:
   datasource:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Un seul Postgres pour tous les services en prod (max_connections=100 par defaut) et
+      # Keycloak a cote : 10 connexions par service par defaut, c'etait deja la moitie du budget
+      # sans compter les redemarrages. Avec des threads virtuels, les requetes attendent une
+      # connexion libre au lieu de monopoliser un thread : 5 suffisent a ce volume.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:5}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
+      # Plus court que les 30 s par defaut : une base saturee doit remonter vite en erreur.
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT:5000}
 
   flyway:
     # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
@@ -75,6 +92,15 @@ bagbuddy:
     jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
     audience: ${JWT_AUDIENCE:bagbuddy-api}
 
+  # --- Notifications email ---
+  # L'autre partie est prevenue a chaque etape (demande, acceptation, refus, paiement, fin,
+  # annulation). L'envoi suit le commit et ne peut jamais faire echouer une transition.
+  notifications:
+    enabled: ${NOTIFICATIONS_ENABLED:true}
+    from: ${MAIL_FROM:BagBuddy <no-reply@bagbuddy.local>}
+    # Les liens ouvrent le detail de la transaction sur le front web.
+    front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
+
 # --- Appels service-a-service ---
 # transactionservice tarifie une reservation contre l'annonce reelle detenue par
 # tripservice. Le secret vient de l'environnement, jamais du depot.
@@ -107,6 +133,10 @@ bagbuddy.transaction.status:
   cancelled: cancelled
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
   tracing:
     sampling:
       # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
@@ -118,7 +148,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
   endpoint:
     health:
       # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
@@ -153,3 +186,16 @@ resilience4j:
           - java.util.NoSuchElementException
           - java.lang.IllegalArgumentException
           - org.springframework.security.access.AccessDeniedException
+
+# En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
+spring.mail:
+  host: ${SMTP_HOST:localhost}
+  port: ${SMTP_PORT:1025}
+  username: ${SMTP_USERNAME:}
+  password: ${SMTP_PASSWORD:}
+  properties:
+    mail.smtp.auth: ${SMTP_AUTH:false}
+    mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+    mail.smtp.connectiontimeout: 5000
+    mail.smtp.timeout: 5000
+    mail.smtp.writetimeout: 5000

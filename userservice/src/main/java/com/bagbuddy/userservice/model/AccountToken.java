@@ -18,7 +18,8 @@ import java.time.LocalDateTime;
 public class AccountToken {
 
     public enum Purpose {
-        PASSWORD_RESET
+        PASSWORD_RESET,
+        EMAIL_VERIFICATION
     }
 
     @Id

@@ -30,8 +30,9 @@ services:
       - bagbuddy-network
 
   # --- EMAILS ---
-  # Faux serveur SMTP : userservice y envoie les emails de compte (mot de passe oublie),
-  # qui ne partent nulle part et se lisent sur http://localhost:8025.
+  # Faux serveur SMTP : userservice (mot de passe oublie, verification) et transactionservice
+  # (notifications) y envoient leurs emails, qui ne partent nulle part et se lisent sur
+  # http://localhost:8025.
   mailpit:
     image: axllent/mailpit:v1.27
     container_name: mailpit
@@ -286,6 +287,10 @@ services:
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
       - TRIP_SERVICE_URL=http://trip-service:8082
+      # Notifications email des transitions : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
       # true (defaut) : une transaction ne passe "confirmed" qu'apres le webhook Stripe
       # signe. false dans .env pour simuler le paiement sans cles Stripe.
       - PAYMENTS_REQUIRE_STRIPE=${PAYMENTS_REQUIRE_STRIPE:-true}
@@ -440,6 +445,36 @@ services:
       - STRIPE_API_KEY=${STRIPE_SECRET_KEY:-}
     depends_on:
       - api-gateway
+    networks:
+      - bagbuddy-network
+
+  # Metriques de toute la stack : meme configuration de scrape qu'en production (les noms de
+  # service sont les memes). Optionnel : docker compose ... --profile monitoring up -d
+  # Prometheus sur http://localhost:9090, Grafana sur http://localhost:3000 (admin / admin).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks:
+      - bagbuddy-network
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: grafana
+    profiles: ["monitoring"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
     networks:
       - bagbuddy-network
 

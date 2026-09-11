@@ -28,6 +28,10 @@ eureka:
     eviction-interval-timer-in-ms: 10000
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
   tracing:
     sampling:
       # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
@@ -39,7 +43,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
   endpoint:
     health:
       # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.

@@ -71,3 +71,34 @@ BEGIN
 
     PERFORM setval(pg_get_serial_sequence('trip', 'id'), (SELECT max(id) FROM trip));
 END $$;
+
+-- Reservations des transactions acceptees, payees ou terminees de seed/transactionservice :
+-- ce sont elles que remaining_weight ci-dessus a deja deduites. Bloc separe, pour qu'une base
+-- de dev semee avant l'arrivee de trip_reservation recoive aussi ses lignes. Rien n'est insere
+-- si les annonces ne sont pas celles du seed.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM trip_reservation)
+       OR NOT EXISTS (SELECT 1 FROM trip WHERE id = 1 AND user_id = '5eed0000-0000-4000-8000-000000000001') THEN
+        RETURN;
+    END IF;
+
+    INSERT INTO trip_reservation (trip_id, transaction_id, weight, created_at, released_at)
+    SELECT r.trip_id, r.transaction_id, r.weight, now() - make_interval(days => r.created_days_ago), NULL
+    FROM (VALUES
+        -- (annonce, transaction, poids, jours) : memes valeurs que booking(...) cote transactions.
+        (1, 2, 3.00, 3),
+        (1, 3, 4.00, 5),
+        (3, 4, 6.00, 30),
+        (3, 5, 4.00, 28),
+        (7, 9, 12.00, 35),
+        (7, 10, 8.00, 33),
+        (8, 11, 5.00, 12),
+        (9, 12, 6.00, 2),
+        (11, 14, 5.00, 25),
+        (14, 17, 7.00, 18),
+        (15, 21, 6.00, 1),
+        (16, 18, 8.00, 4),
+        (18, 20, 5.00, 40)
+    ) AS r(trip_id, transaction_id, weight, created_days_ago);
+END $$;

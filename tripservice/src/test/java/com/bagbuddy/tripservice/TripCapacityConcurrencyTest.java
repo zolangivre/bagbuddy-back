@@ -2,6 +2,7 @@ package com.bagbuddy.tripservice;
 
 import com.bagbuddy.tripservice.model.Trip;
 import com.bagbuddy.tripservice.repository.TripRepository;
+import com.bagbuddy.tripservice.repository.TripReservationRepository;
 import com.bagbuddy.tripservice.service.TripService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
@@ -93,8 +94,12 @@ class TripCapacityConcurrencyTest {
     @Autowired
     private TripRepository tripRepository;
 
+    @Autowired
+    private TripReservationRepository reservationRepository;
+
     @Test
     void concurrentBookingsCannotOversellTheSameListing() throws Exception {
+        reservationRepository.deleteAll();
         tripRepository.deleteAll();
 
         Trip trip = new Trip();
@@ -112,12 +117,13 @@ class TripCapacityConcurrencyTest {
         BigDecimal each = new BigDecimal("4");
         AtomicInteger accepted = new AtomicInteger();
         AtomicInteger refused = new AtomicInteger();
+        AtomicInteger nextTransaction = new AtomicInteger();
 
         ExecutorService pool = Executors.newFixedThreadPool(attempts);
         try {
             List<Callable<Void>> bookings = java.util.Collections.nCopies(attempts, (Callable<Void>) () -> {
                 try {
-                    tripService.reserveCapacity(id, each);
+                    tripService.reserveCapacity(id, each, (long) nextTransaction.incrementAndGet());
                     accepted.incrementAndGet();
                 } catch (IllegalArgumentException expected) {
                     // "Requested weight exceeds the remaining capacity" : c'est le
@@ -140,5 +146,42 @@ class TripCapacityConcurrencyTest {
         BigDecimal remaining = tripRepository.findById(id).orElseThrow().getRemainingWeight();
         assertThat(remaining).isEqualByComparingTo("2");
         assertThat(remaining.signum()).isNotNegative();
+    }
+
+    /**
+     * Le double-clic sur "accepter" : la meme transaction reservee quatre fois en meme temps. Le
+     * verrou de l'annonce serialise les appels, et le premier laisse une ligne de reservation que
+     * les suivants voient : le poids ne sort qu'une fois.
+     */
+    @Test
+    void concurrentReplaysOfTheSameReservationTakeTheWeightOnce() throws Exception {
+        reservationRepository.deleteAll();
+        tripRepository.deleteAll();
+        Trip trip = new Trip();
+        trip.setUserId("seller-sub");
+        trip.setDepartureAirport("CDG");
+        trip.setArrivalAirport("JFK");
+        trip.setDepartureDate(LocalDateTime.now().plusDays(10));
+        trip.setArrivalDate(LocalDateTime.now().plusDays(10).plusHours(8));
+        trip.setTotalWeightAvailable(new BigDecimal("10"));
+        trip.setRemainingWeight(new BigDecimal("10"));
+        trip.setPricePerKg(new BigDecimal("12.50"));
+        Long id = tripRepository.save(trip).getId();
+
+        int attempts = 4;
+        ExecutorService pool = Executors.newFixedThreadPool(attempts);
+        try {
+            List<Callable<Void>> replays = java.util.Collections.nCopies(attempts, (Callable<Void>) () -> {
+                tripService.reserveCapacity(id, new BigDecimal("4"), 4242L);
+                return null;
+            });
+            for (Future<Void> result : pool.invokeAll(replays)) {
+                result.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(tripRepository.findById(id).orElseThrow().getRemainingWeight()).isEqualByComparingTo("6");
     }
 }

@@ -23,7 +23,7 @@ public class TransactionStateMachine {
     public enum Actor { BUYER, SELLER }
 
     /** Side effect the service must apply when the edge is taken. */
-    public enum Effect { NONE, REPRICE, RESERVE_CAPACITY, SETTLE_PAYMENT }
+    public enum Effect { NONE, REPRICE, RESERVE_CAPACITY, SETTLE_PAYMENT, RELEASE_CAPACITY }
 
     public record StatusPair(String sellerStatus, String buyerStatus) {
         public StatusPair {
@@ -38,6 +38,12 @@ public class TransactionStateMachine {
     private final List<Transition> transitions;
     private final StatusPair initial;
     private final StatusPair awaitingPayment;
+    private final StatusPair cancelled;
+    private final StatusPair completed;
+    /** Les paires ou le poids de la transaction est pris sur l'annonce. */
+    private final List<StatusPair> holdingCapacity;
+    /** Les paires qu'un depart passe rend caduques : rien n'a encore ete paye. */
+    private final List<StatusPair> expirable;
 
     public TransactionStateMachine(TransactionStatusProperties status) {
 
@@ -50,6 +56,13 @@ public class TransactionStateMachine {
 
         this.initial = requested;
         this.awaitingPayment = accepted;
+        this.cancelled = cancelled;
+        this.completed = completed;
+        this.holdingCapacity = List.of(accepted, confirmed, completed);
+        // Hors graphe, et hors acteurs : c'est le planificateur qui les annule une fois le vol
+        // parti (TransactionService.expireDepartedRequests). Une transaction payee n'y figure
+        // pas -- l'argent est engage, son sort ne se decide pas en silence.
+        this.expirable = List.of(requested, rejected, accepted);
         this.transitions = List.of(
                 // The buyer asks again with a different weight after a refusal: re-priced server-side.
                 new Transition(rejected, requested, List.of(Actor.BUYER), Effect.REPRICE),
@@ -62,12 +75,35 @@ public class TransactionStateMachine {
                 new Transition(confirmed, completed, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
                 new Transition(requested, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
                 new Transition(rejected, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
-                new Transition(accepted, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
-                new Transition(confirmed, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE));
+                // Annuler apres l'acceptation rend le poids a l'annonce : il avait ete pris a ce moment-la.
+                new Transition(accepted, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.RELEASE_CAPACITY),
+                new Transition(confirmed, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.RELEASE_CAPACITY));
     }
 
     public StatusPair initialPair() {
         return initial;
+    }
+
+    public StatusPair cancelledPair() {
+        return cancelled;
+    }
+
+    public boolean isExpirable(StatusPair pair) {
+        return expirable.contains(pair);
+    }
+
+    /** Les paires expirables, sous la forme "vendeur/acheteur" que la requete de selection compare. */
+    public List<String> expirableKeys() {
+        return expirable.stream().map(p -> p.sellerStatus() + "/" + p.buyerStatus()).toList();
+    }
+
+    public boolean isCompleted(StatusPair pair) {
+        return completed.equals(pair);
+    }
+
+    /** Vrai tant que la transaction occupe du poids sur l'annonce : acceptee, payee ou terminee. */
+    public boolean holdsCapacity(StatusPair pair) {
+        return holdingCapacity.contains(pair);
     }
 
     /** The only pair in which a payment may be recorded: the seller has accepted, the buyer owes. */

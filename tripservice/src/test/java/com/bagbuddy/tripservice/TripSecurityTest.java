@@ -3,6 +3,7 @@ package com.bagbuddy.tripservice;
 import com.bagbuddy.tripservice.model.Trip;
 import com.bagbuddy.tripservice.model.UserInfo;
 import com.bagbuddy.tripservice.repository.TripRepository;
+import com.bagbuddy.tripservice.repository.TripReservationRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,10 +47,14 @@ class TripSecurityTest {
     private TripRepository tripRepository;
 
     @Autowired
+    private TripReservationRepository reservationRepository;
+
+    @Autowired
     private ObjectMapper objectMapper;
 
     @BeforeEach
     void reset() {
+        reservationRepository.deleteAll();
         tripRepository.deleteAll();
     }
 
@@ -277,13 +282,13 @@ class TripSecurityTest {
         mockMvc.perform(post("/trips/internal/" + trip.getId() + "/reserve")
                         .with(jwt().jwt(j -> j.subject(BOB)))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"weight\":5}"))
+                        .content("{\"weight\":5,\"transactionId\":101}"))
                 .andExpect(status().isForbidden());
 
         mockMvc.perform(post("/trips/internal/" + trip.getId() + "/reserve")
                         .with(serviceRole)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"weight\":5}"))
+                        .content("{\"weight\":5,\"transactionId\":101}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.remainingWeight").value(15));
 
@@ -291,7 +296,7 @@ class TripSecurityTest {
         mockMvc.perform(post("/trips/internal/" + trip.getId() + "/reserve")
                         .with(serviceRole)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"weight\":99}"))
+                        .content("{\"weight\":99,\"transactionId\":102}"))
                 .andExpect(status().isBadRequest());
 
         assertThat(tripRepository.findById(trip.getId()).orElseThrow().getRemainingWeight())

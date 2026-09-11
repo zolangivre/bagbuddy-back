@@ -2,6 +2,8 @@ package com.bagbuddy.tripservice.controller;
 
 import com.bagbuddy.tripservice.dto.TripInput;
 import com.bagbuddy.tripservice.dto.TripResponse;
+import com.bagbuddy.tripservice.dto.TripSearchInput;
+import com.bagbuddy.tripservice.dto.TripSearchResult;
 import com.bagbuddy.tripservice.security.CallerIdentity;
 import com.bagbuddy.tripservice.service.TripService;
 import org.springframework.graphql.data.method.annotation.Argument;
@@ -48,13 +50,25 @@ public class TripGraphQlController {
     }
 
     @QueryMapping
+    public TripSearchResult searchTrips(@Argument TripSearchInput filter, @Argument Integer limit,
+                                        @Argument Integer offset, @AuthenticationPrincipal Jwt jwt) {
+        TripService.SearchPage page = tripService.search(filter, limit, offset);
+        return new TripSearchResult(
+                TripResponse.of(page.items(), CallerIdentity.subOf(jwt)),
+                page.stats().count(),
+                page.stats().totalRemainingWeight(),
+                page.stats().averagePricePerKg());
+    }
+
+    @QueryMapping
     public TripResponse trip(@Argument Long id, @AuthenticationPrincipal Jwt jwt) {
         return TripResponse.of(tripService.getTripById(id), CallerIdentity.subOf(jwt));
     }
 
     @QueryMapping
-    public List<TripResponse> tripsByUser(@Argument String userId, @AuthenticationPrincipal Jwt jwt) {
-        return TripResponse.of(tripService.getTripsByUserId(userId), CallerIdentity.subOf(jwt));
+    public List<TripResponse> tripsByUser(@Argument String userId, @Argument Integer limit,
+                                          @Argument Integer offset, @AuthenticationPrincipal Jwt jwt) {
+        return TripResponse.of(tripService.getTripsByUserId(userId, limit, offset), CallerIdentity.subOf(jwt));
     }
 
     @QueryMapping

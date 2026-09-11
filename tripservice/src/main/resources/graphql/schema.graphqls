@@ -13,9 +13,16 @@ type Query {
 
     inactiveTrips(limit: Int, offset: Int): [Trip!]!
 
+    """
+    Annonces encore reservables, filtrees et triees cote serveur, avec le nombre total de resultats
+    et les agregats du filtre entier. limit/offset optionnels, 200 elements au plus par page.
+    """
+    searchTrips(filter: TripSearchInput, limit: Int, offset: Int): TripSearchResult!
+
     trip(id: ID!): Trip!
 
-    tripsByUser(userId: String!): [Trip!]!
+    "Les plus recentes d'abord. limit/offset optionnels, 200 elements au plus par page."
+    tripsByUser(userId: String!, limit: Int, offset: Int): [Trip!]!
 
     """
     Compte de paiement du voyageur. Lisible uniquement par son proprietaire : le parcours de
@@ -71,6 +78,51 @@ type UserInfoView {
     location: String
     email: String
     phone: String
+}
+
+"Les tris de la liste d'annonces. id departage les egalites, pour une pagination stable."
+enum TripSort {
+    RECENT
+    EARLIEST_DEPARTURE
+    PRICE_LOW
+    PRICE_HIGH
+    WEIGHT_HIGH
+    WEIGHT_LOW
+}
+
+"Tous les champs sont optionnels ; un champ absent ne filtre pas."
+input TripSearchInput {
+    "Code IATA, insensible a la casse."
+    departureAirport: String
+    arrivalAirport: String
+
+    "Jour de depart cherche, YYYY-MM-DD, en heure locale de l'aeroport."
+    date: String
+
+    "Tolerance autour de date, en jours (0 a 30). Ignoree sans date."
+    flexDays: Int
+    minPricePerKg: BigDecimal
+    maxPricePerKg: BigDecimal
+
+    "Bornes sur le poids encore disponible."
+    minWeight: BigDecimal
+    maxWeight: BigDecimal
+
+    "RECENT par defaut."
+    sort: TripSort
+}
+
+type TripSearchResult {
+    items: [Trip!]!
+
+    "Nombre d'annonces correspondant au filtre, toutes pages confondues."
+    totalCount: Int!
+
+    "Poids disponible cumule sur tout le filtre."
+    totalRemainingWeight: BigDecimal!
+
+    "Prix moyen au kilo sur tout le filtre. Null sans resultat."
+    averagePricePerKg: BigDecimal
 }
 
 input TripInput {

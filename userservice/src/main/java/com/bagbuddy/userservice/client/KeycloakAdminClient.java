@@ -98,6 +98,23 @@ public class KeycloakAdminClient {
         return run(() -> findUserInternal(userId));
     }
 
+    /**
+     * Marks the email as verified. Only the flag is sent: Keycloak's user update merges a
+     * partial representation, as {@link #updateIdentity} already relies on.
+     */
+    public void markEmailVerified(String userId) {
+        run(() -> {
+            keycloak.put()
+                    .uri("/admin/realms/{realm}/users/{id}", realm, userId)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokenProvider.tokenValue())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of("emailVerified", true))
+                    .retrieve()
+                    .toBodilessEntity();
+            return null;
+        });
+    }
+
     /** Ends every session of the account: refresh tokens held elsewhere stop working. */
     public void logout(String userId) {
         run(() -> {

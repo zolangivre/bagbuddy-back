@@ -2,6 +2,14 @@ spring:
   application:
     name: stripe-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
   # --- GraphQL ---
   # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
   # de chemin (Path=/stripe/**) sans reecriture, et un appel direct au conteneur emprunte
@@ -35,6 +43,10 @@ eureka:
     lease-expiration-duration-in-seconds: 15
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
   tracing:
     sampling:
       # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
@@ -46,7 +58,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
   endpoint:
     health:
       # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.

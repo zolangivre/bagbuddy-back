@@ -7,6 +7,7 @@ import com.stripe.model.Event;
 import com.stripe.model.PaymentIntent;
 import com.stripe.net.Webhook;
 import com.stripe.param.PaymentIntentCreateParams;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,8 +29,10 @@ public class StripeService {
     private final String webhookSecret;
     private final String awaitingPaymentStatus;
     private final String paymentRequiredStatus;
+    private final MeterRegistry meters;
 
     public StripeService(TransactionClient transactionClient,
+                         MeterRegistry meters,
                          @Value("${bagbuddy.stripe.currency:eur}") String currency,
                          @Value("${STRIPE_WEBHOOK_SECRET}") String webhookSecret,
                          // Same keys as transactionservice's TransactionStatusProperties, so an
@@ -43,6 +46,15 @@ public class StripeService {
         this.webhookSecret = webhookSecret;
         this.awaitingPaymentStatus = awaitingPaymentStatus;
         this.paymentRequiredStatus = paymentRequiredStatus;
+        this.meters = meters;
+    }
+
+    /**
+     * Un paiement encaisse par Stripe mais pas enregistre sur la transaction : de l'argent a rendre
+     * a la main. Le log dit lequel ; ce compteur est ce sur quoi une alerte peut se declencher.
+     */
+    private void countUnrecordedPayment(String reason) {
+        meters.counter("bagbuddy.payments.unrecorded", "reason", reason).increment();
     }
 
     /**
@@ -121,6 +133,7 @@ public class StripeService {
         if (!currency.equalsIgnoreCase(intent.getCurrency())) {
             log.error("PaymentIntent {} for transaction {} was paid in {} instead of {}: not recorded, "
                     + "refund it manually", intent.getId(), transactionId, intent.getCurrency(), currency);
+            countUnrecordedPayment("currency");
             return;
         }
         try {
@@ -136,6 +149,7 @@ public class StripeService {
             log.error("PaymentIntent {} for transaction {} was refused by transactionservice: not "
                     + "recorded, refund it manually ({})", intent.getId(), transactionId,
                     ex.getResponseBodyAsString());
+            countUnrecordedPayment("refused");
         }
     }
 }

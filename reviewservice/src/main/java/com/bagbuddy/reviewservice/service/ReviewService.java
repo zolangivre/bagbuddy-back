@@ -6,7 +6,8 @@ import com.bagbuddy.reviewservice.model.Review;
 import com.bagbuddy.reviewservice.repository.ReviewRepository;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.data.domain.PageRequest;
+import com.bagbuddy.reviewservice.repository.OffsetPageRequest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,10 +33,14 @@ public class ReviewService {
     /** Plafond dur : une lecture non filtree ne doit jamais pouvoir ramener toute la table. */
     public static final int MAX_PAGE = 200;
 
-    public List<Review> getAll(Integer limit, Integer offset) {
+    /** limit/offset optionnels ; sans eux la page vaut MAX_PAGE. L'offset est pris tel quel. */
+    private static OffsetPageRequest page(Integer limit, Integer offset, Sort sort) {
         int size = limit == null ? MAX_PAGE : Math.clamp(limit, 1, MAX_PAGE);
-        int page = offset == null ? 0 : Math.max(offset, 0) / size;
-        return reviewRepository.findAll(PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt")))
+        return new OffsetPageRequest(offset == null ? 0 : Math.max(offset, 0), size, sort);
+    }
+
+    public List<Review> getAll(Integer limit, Integer offset) {
+        return reviewRepository.findAll(page(limit, offset, Sort.by(Sort.Direction.DESC, "createdAt", "id")))
                 .getContent();
     }
 
@@ -44,12 +49,15 @@ public class ReviewService {
                 .orElseThrow(() -> new NoSuchElementException("Review not found with id " + id));
     }
 
-    public List<Review> byReviewee(String revieweeId) {
-        return reviewRepository.findByRevieweeId(revieweeId);
+    /** Les plus recents d'abord, plafonnes comme toute liste : un membre tres note ne sert pas tout. */
+    public List<Review> byReviewee(String revieweeId, Integer limit, Integer offset) {
+        return reviewRepository.findByRevieweeIdOrderByCreatedAtDescIdDesc(
+                revieweeId, page(limit, offset, Sort.unsorted()));
     }
 
-    public List<Review> byReviewer(String reviewerId) {
-        return reviewRepository.findByReviewerId(reviewerId);
+    public List<Review> byReviewer(String reviewerId, Integer limit, Integer offset) {
+        return reviewRepository.findByReviewerIdOrderByCreatedAtDescIdDesc(
+                reviewerId, page(limit, offset, Sort.unsorted()));
     }
 
     public List<Review> byTransaction(Long transactionId) {
@@ -92,7 +100,13 @@ public class ReviewService {
         review.setRevieweeName(tx.counterpartNameOf(reviewerId));
         review.setRating(validRating(body.getRating()));
         review.setComment(body.getComment());
-        return reviewRepository.save(review);
+        try {
+            // Flush immediat : c'est la contrainte unique qui tranche entre deux envois
+            // simultanes, et son refus doit se lire ici plutot qu'au commit.
+            return reviewRepository.saveAndFlush(review);
+        } catch (DataIntegrityViolationException duplicate) {
+            throw new IllegalArgumentException("This transaction has already been reviewed");
+        }
     }
 
     /** Only the author may edit, and only the content -- never who it is about. */

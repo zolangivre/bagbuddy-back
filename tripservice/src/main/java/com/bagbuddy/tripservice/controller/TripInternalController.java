@@ -37,14 +37,23 @@ public class TripInternalController {
     }
 
     /**
-     * Reserve de la capacite et renvoie l'annonce telle qu'elle est desormais. Le controle de
-     * capacite et le prix proviennent ainsi de la meme lecture verrouillee.
+     * Reserve de la capacite pour une transaction et renvoie l'annonce telle qu'elle est
+     * desormais. Rejouable : la meme transaction ne prend jamais le poids deux fois.
      */
     @PostMapping("/{id}/reserve")
     public Trip reserveCapacity(@PathVariable Long id, @RequestBody ReserveRequest body) {
-        return tripService.reserveCapacity(id, body.weight());
+        return tripService.reserveCapacity(id, body.weight(), body.transactionId());
     }
 
-    public record ReserveRequest(BigDecimal weight) {
+    /** Rend a l'annonce le poids d'une transaction annulee. Rejouable, sans effet la deuxieme fois. */
+    @PostMapping("/{id}/release")
+    public Trip releaseCapacity(@PathVariable Long id, @RequestBody ReleaseRequest body) {
+        return tripService.releaseCapacity(id, body.transactionId());
+    }
+
+    public record ReserveRequest(BigDecimal weight, Long transactionId) {
+    }
+
+    public record ReleaseRequest(Long transactionId) {
     }
 }

@@ -42,7 +42,7 @@ class PasswordResetTest {
 
     private static final String ALICE = "alice-sub";
     private static final KeycloakUser ALICE_ACCOUNT =
-            new KeycloakUser(ALICE, "alice@example.com", "Alice", true);
+            new KeycloakUser(ALICE, "alice@example.com", "Alice", true, false);
 
     private static final String REQUEST =
             "mutation($i: RequestPasswordResetInput!) { requestPasswordReset(input: $i) }";
@@ -107,7 +107,7 @@ class PasswordResetTest {
     @Test
     void aDisabledAccountGetsNoEmail() throws Exception {
         when(keycloak.findUserByEmail("alice@example.com"))
-                .thenReturn(Optional.of(new KeycloakUser(ALICE, "alice@example.com", "Alice", false)));
+                .thenReturn(Optional.of(new KeycloakUser(ALICE, "alice@example.com", "Alice", false, false)));
 
         perform(REQUEST, Map.of("email", "alice@example.com"))
                 .andExpect(jsonPath("$.data.requestPasswordReset").value(true));
@@ -153,7 +153,7 @@ class PasswordResetTest {
     void aLinkSentToAnAddressTheAccountNoLongerHasIsRefused() throws Exception {
         String token = requestAliceLink();
         when(keycloak.findUser(ALICE))
-                .thenReturn(Optional.of(new KeycloakUser(ALICE, "alice@new.example.com", "Alice", true)));
+                .thenReturn(Optional.of(new KeycloakUser(ALICE, "alice@new.example.com", "Alice", true, false)));
 
         perform(RESET, Map.of("token", token, "newPassword", "nouveaumotdepasse"))
                 .andExpect(jsonPath("$.errors[0].extensions.code").value("invalid_reset_token"));

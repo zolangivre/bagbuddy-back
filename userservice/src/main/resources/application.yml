@@ -2,6 +2,14 @@ spring:
   application:
     name: user-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
   # --- GraphQL ---
   # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
   # de chemin (Path=/users/**) sans reecriture, et un appel direct au conteneur emprunte
@@ -17,6 +25,15 @@ spring:
   datasource:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Un seul Postgres pour tous les services en prod (max_connections=100 par defaut) et
+      # Keycloak a cote : 10 connexions par service par defaut, c'etait deja la moitie du budget
+      # sans compter les redemarrages. Avec des threads virtuels, les requetes attendent une
+      # connexion libre au lieu de monopoliser un thread : 5 suffisent a ce volume.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:5}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
+      # Plus court que les 30 s par defaut : une base saturee doit remonter vite en erreur.
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT:5000}
 
   flyway:
     # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
@@ -75,6 +92,10 @@ bagbuddy:
     # Au plus un email par compte sur cet intervalle : une rafale de demandes ne doit pas
     # devenir une rafale d'emails dans la boite du titulaire.
     min-interval: ${PASSWORD_RESET_MIN_INTERVAL:60s}
+  email-verification:
+    # Plus long que la reinitialisation : le lien ne donne aucun acces au compte.
+    validity: ${EMAIL_VERIFICATION_VALIDITY:24h}
+    min-interval: ${EMAIL_VERIFICATION_MIN_INTERVAL:60s}
 
 # En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
 spring.mail:
@@ -123,6 +144,10 @@ eureka:
     lease-expiration-duration-in-seconds: 15
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
   tracing:
     sampling:
       # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
@@ -134,7 +159,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
   endpoint:
     health:
       # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.

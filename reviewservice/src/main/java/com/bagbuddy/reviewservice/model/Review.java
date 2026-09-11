@@ -7,7 +7,9 @@ import java.time.LocalDateTime;
 
 @Data
 @Entity
-@Table(name = "review")
+// La contrainte est posee par Flyway (V4) ; la declarer ici la donne aussi au schema H2 des tests.
+@Table(name = "review", uniqueConstraints = @UniqueConstraint(
+        name = "uk_review_reviewer_transaction", columnNames = {"reviewer_id", "transaction_id"}))
 public class Review {
 
     @Id

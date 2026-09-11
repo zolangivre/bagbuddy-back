@@ -21,6 +21,16 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     Long countByBuyerIdOrSellerId(String buyerId, String sellerId);
 
     /**
+     * Candidates a l'expiration. departureDate est l'instantane texte de l'annonce, au format de
+     * LocalDateTime.toString() : entre dates ISO, l'ordre lexical est l'ordre chronologique. Les
+     * valeurs trop courtes pour etre une date sont ecartees plutot que comparees.
+     */
+    @Query("select t.id from Transaction t where t.listingInfo.departureDate < :now "
+            + "and length(t.listingInfo.departureDate) >= 16 "
+            + "and concat(t.sellerStatus, '/', t.buyerStatus) in :pairs")
+    List<Long> findDepartedWithStatus(@Param("now") String now, @Param("pairs") List<String> pairs);
+
+    /**
      * Verrou de ligne pour la phase d'ecriture de update() : les appels distants ayant eu lieu
      * hors transaction, la ligne est relue ici sous verrou et la transition revalidee.
      */

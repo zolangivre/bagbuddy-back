@@ -9,9 +9,13 @@ import com.bagbuddy.userservice.dto.UpdateIdentityRequest;
 import com.bagbuddy.userservice.dto.UpdateProfileRequest;
 import com.bagbuddy.userservice.dto.UserProfile;
 import com.bagbuddy.userservice.service.AccountService;
+import com.bagbuddy.userservice.service.EmailVerificationService;
 import com.bagbuddy.userservice.service.PasswordResetService;
 import com.bagbuddy.userservice.service.UserService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import org.springframework.graphql.data.method.annotation.Argument;
 import org.springframework.graphql.data.method.annotation.MutationMapping;
 import org.springframework.graphql.data.method.annotation.QueryMapping;
@@ -41,12 +45,15 @@ public class UserGraphQlController {
     private final UserService userService;
     private final AccountService accountService;
     private final PasswordResetService passwordResetService;
+    private final EmailVerificationService emailVerificationService;
 
     public UserGraphQlController(UserService userService, AccountService accountService,
-                                 PasswordResetService passwordResetService) {
+                                 PasswordResetService passwordResetService,
+                                 EmailVerificationService emailVerificationService) {
         this.userService = userService;
         this.accountService = accountService;
         this.passwordResetService = passwordResetService;
+        this.emailVerificationService = emailVerificationService;
     }
 
     @QueryMapping
@@ -90,6 +97,25 @@ public class UserGraphQlController {
     @PreAuthorize("permitAll()")
     public boolean resetPassword(@Argument @Valid ResetPasswordRequest input) {
         passwordResetService.resetPassword(input);
+        return true;
+    }
+
+    /** L'adresse est celle du compte de l'appelant, lue chez Keycloak : jamais un parametre. */
+    @MutationMapping
+    @PreAuthorize("isAuthenticated()")
+    public boolean sendVerificationEmail(@Argument @Pattern(regexp = "en|fr") String language,
+                                         @AuthenticationPrincipal Jwt jwt) {
+        return emailVerificationService.send(jwt, language);
+    }
+
+    /**
+     * Anonyme : le lien s'ouvre souvent sur un autre appareil que celui qui l'a demande (l'app
+     * mail du telephone). Le jeton designe le compte.
+     */
+    @MutationMapping
+    @PreAuthorize("permitAll()")
+    public boolean verifyEmail(@Argument @NotBlank @Size(max = 64) String token) {
+        emailVerificationService.verify(token);
         return true;
     }
 

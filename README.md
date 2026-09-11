@@ -226,13 +226,23 @@ mémoire, sans Docker ni Keycloak :
 cd tripservice && ./mvnw test
 ```
 
-Une exception : `TripCapacityConcurrencyTest` a besoin d'un vrai PostgreSQL,
-parce qu'il vérifie précisément ce qu'H2 n'émule pas fidèlement — le
-`SELECT ... FOR UPDATE` qui empêche deux réservations simultanées de survendre la
-capacité d'une annonce. Il démarre un conteneur via Testcontainers si Docker est
-disponible, accepte sinon une base fournie par l'environnement (voir le javadoc
-de la classe), et **s'ignore de lui-même** si ni l'un ni l'autre — le reste de la
-suite continue de tourner sans Docker.
+Quelques tests ont besoin d'un vrai PostgreSQL, parce qu'ils vérifient ce qu'H2
+n'émule pas fidèlement :
+
+- `TripCapacityConcurrencyTest` : le `SELECT ... FOR UPDATE` qui empêche deux
+  réservations simultanées de survendre une annonce, et le rejeu concurrent d'une
+  même réservation (double-clic) qui ne doit décompter le poids qu'une fois ;
+- `ReviewMigrationTest` et `ReviewSchemaValidationTest` : les vraies migrations
+  Flyway, et les entités validées contre elles.
+
+Ils démarrent un conteneur via Testcontainers si Docker est disponible et
+**s'ignorent d'eux-mêmes** sinon — le reste de la suite continue de tourner sans
+Docker. Testcontainers est épinglé en 1.21.4 : la 1.21.3 fournie par Spring Boot
+est refusée par Docker Engine 29, et ces tests étaient alors ignorés sans bruit.
+
+La CI (`.github/workflows/ci.yml`) lance `./mvnw verify` sur chaque service à
+chaque push et pull request, tests Postgres compris, valide les deux fichiers
+compose et, sur les push, construit toutes les images.
 
 Les cinq services métier embarquent des tests de sécurité qui vérifient
 concrètement les règles décrites plus bas, en tapant sur le vrai endpoint GraphQL à
@@ -434,6 +444,33 @@ cette console — et doit aussi être reportée dans
 Changer `BAGBUDDY_FRONT_URL` après coup demande donc les deux : le client
 `bagbuddy-web` dans la console, et `up -d api-gateway` pour le CORS.
 
+### Supervision
+
+Prometheus et Grafana ne démarrent pas par défaut (environ 500 Mo à eux deux) :
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod --profile monitoring up -d
+ssh -L 3000:127.0.0.1:3000 ubuntu@<IP-de-la-VM>
+# puis ouvre http://localhost:3000 (admin / GRAFANA_ADMIN_PASSWORD)
+```
+
+La source Prometheus est déjà configurée dans Grafana. Pour les tableaux de bord,
+importe par identifiant **4701** (JVM Micrometer) et **19004** (Spring Boot 3).
+Les règles d'alerte de `deploy/monitoring/alerts.yml` s'affichent dans Grafana et
+dans l'onglet Alerts de Prometheus. Deux d'entre elles signalent une action à
+faire à la main :
+
+- `PaymentNotRecorded` : Stripe a encaissé un paiement qu'aucune transaction n'a
+  enregistré. Le PaymentIntent est dans les logs de `stripe-service` ; rembourse-le
+  depuis le dashboard Stripe.
+- `CapacityNotReleased` : une annulation n'a pas rendu son poids à l'annonce. La
+  commande à rejouer (`POST /trips/internal/{id}/release`) est dans les logs de
+  `transaction-service`.
+
+En dev, le même couple se lance avec
+`docker compose -f docker-compose.dev.yml --profile monitoring up -d`
+(Prometheus sur http://localhost:9090, Grafana sur http://localhost:3000).
+
 ### Sauvegardes
 
 `deploy/backup.sh` écrit un dump compressé de toutes les bases (Keycloak compris)
@@ -472,6 +509,8 @@ Deux messages sont attendus pendant la restauration et sans conséquence :
 | Le front reçoit une erreur CORS | son origine diffère de `BAGBUDDY_FRONT_URL` (schéma, `www`, slash final) |
 | Tous les appels répondent `401` | jeton émis par un autre Keycloak (dev ?), ou mapper d'audience `bagbuddy-api-audience` perdu sur le client (voir Authentification) |
 | Paiement jamais confirmé | webhook Stripe mal déclaré : vérifier l'URL, l'événement et `STRIPE_WEBHOOK_SECRET` ; le dashboard Stripe affiche la réponse reçue |
+| Démarrages redevenus lents après une modif de config | l'entraînement CDS a échoué au build (nouvelle propriété obligatoire sans valeur factice dans le `RUN` du Dockerfile) : chercher `CDS training failed` dans la sortie du build |
+| `deleteTrip` refusé (« accepted bookings ») | une réservation acceptée ou payée tient encore du poids : annuler la transaction d'abord |
 
 ---
 
@@ -516,7 +555,7 @@ existante, Flyway la marque comme déjà appliquée (`baseline-on-migrate`) au l
 de la rejouer : les données de dev survivent à la bascule. Sur une base neuve,
 elle est jouée normalement.
 
-Pour ajouter une colonne : écris la migration suivante (`V4__...sql`), ne touche
+Pour ajouter une colonne : écris la migration suivante (`V<n+1>__...sql`), ne touche
 jamais à une migration déjà appliquée, et mets l'entité JPA en face. Pense aussi
 au fichier de `seed/<service>/afterMigrate.sql` si la colonne doit y être
 renseignée : il est rejoué contre le nouveau schéma à chaque base neuve.
@@ -533,6 +572,49 @@ renseignée : il est rejoué contre le nouveau schéma à chaque base neuve.
   Le taux d'échantillonnage est à 100 % en dev (`TRACING_SAMPLE_RATE`). En
   production le tracing est coupé (`MANAGEMENT_TRACING_ENABLED=false`) pour
   économiser la mémoire d'un collecteur.
+- **Métriques** : `/actuator/prometheus` sur chaque JVM (mémoire, requêtes HTTP,
+  pool de connexions, coupe-circuits), plus des compteurs métier : transitions de
+  transaction, expirations, capacité non rendue, paiements non enregistrés.
+  L'endpoint est ouvert sans jeton pour le scrape, et n'est donc joignable que
+  depuis la machine : Caddy renvoie 404 sur `/actuator` hors `health`. Voir
+  *Supervision* pour Prometheus et Grafana.
+
+## Performance au démarrage et à l'exécution
+
+- **Threads virtuels** (Java 21) dans les cinq services métier : une requête passe
+  l'essentiel de son temps à attendre Postgres, un autre service ou Keycloak, et
+  un thread virtuel ne retient aucun thread système pendant cette attente.
+  `VIRTUAL_THREADS_ENABLED=false` les coupe.
+- **Pools de connexions** : 5 par service (`DB_POOL_MAX_SIZE`), 20 pour Keycloak,
+  pour tenir dans les 100 connexions de l'unique Postgres de production.
+- **Archive CDS** : chaque image est construite avec un démarrage d'entraînement
+  dont la JVM archive les classes chargées. Mesuré sur un cœur : 6,7 s → 4,5 s
+  jusqu'au contexte prêt, ce qui compte quand huit JVM démarrent ensemble sur deux
+  cœurs ARM. Le build garde aussi un cache Maven d'une fois sur l'autre.
+
+## Réservations, capacité et recherche
+
+La capacité d'une annonce est rattachée aux transactions : chaque acceptation crée
+une réservation (`trip_reservation`) identifiée par la transaction.
+
+- **Un double-clic sur « accepter » ne décompte le poids qu'une fois** : réserver
+  à nouveau pour la même transaction ne change rien.
+- **Annuler une transaction acceptée ou payée rend son poids** à l'annonce, une
+  fois l'annulation écrite. Si l'appel à `trip-service` échoue, l'annulation reste
+  valide et l'échec est journalisé et compté (voir *Supervision*).
+- **Ce qui tient du poids ne disparaît pas en silence** : une transaction acceptée
+  ou payée doit être annulée avant d'être supprimée, une annonce avec des
+  réservations actives ne se supprime pas, et sa capacité totale ne descend pas
+  sous le poids déjà réservé.
+- **Les demandes jamais payées expirent** : toutes les 15 minutes, les
+  transactions en attente de réponse, refusées ou acceptées sans paiement dont le
+  vol est parti sont annulées (et leur poids rendu). Une transaction payée n'est
+  jamais annulée automatiquement.
+
+`searchTrips` filtre et trie les annonces réservables côté serveur (trajet, jour
+± tolérance, prix, poids restant) et renvoie aussi le total et les agrégats du
+filtre entier ; les listes (`tripsByUser`, `reviewsByReviewee`…) sont paginées à
+200 éléments au plus.
 
 ## Résilience et abus
 
@@ -544,8 +626,9 @@ choix à connaître :
   une annonce qu'on n'a pas lue : un prix par défaut serait pire qu'une erreur.
   Le client reçoit `classification: INTERNAL_ERROR` avec
   `extensions.code = service_unavailable`, qui dit que réessayer a un sens.
-- **La réservation de capacité n'est jamais rejouée.** Ce POST retire du poids
-  d'une annonce ; le rejouer après un timeout ambigu réserverait deux fois.
+- **Aucun rejeu automatique.** Réserver et rendre du poids sont idempotents par
+  transaction, donc un rejeu à la main est sans danger ; mais rejouer reste une
+  décision du code appelant, jamais un effet de bord du client HTTP.
 
 Un 404 ou un refus d'accès ne comptent pas comme des pannes : sans cela, des
 clients demandant des choses inexistantes finiraient par ouvrir le circuit.

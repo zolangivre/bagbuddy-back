@@ -99,6 +99,10 @@ server:
   port: ${PORT:8080}
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
   tracing:
     sampling:
       # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
@@ -110,7 +114,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
   endpoint:
     health:
       # Le gateway n'a aucune securite devant lui : 'always' publierait l'etat

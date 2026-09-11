@@ -1,0 +1,42 @@
+# Regles d'alerte evaluees par Prometheus. Sans Alertmanager, elles s'affichent dans l'onglet
+# Alerts de Prometheus et dans Grafana ; en brancher un n'exige pas de les reecrire.
+groups:
+  - name: bagbuddy
+    rules:
+      - alert: ServiceDown
+        expr: up{job="bagbuddy"} == 0
+        for: 2m
+        annotations:
+          summary: "{{ $labels.instance }} ne repond plus au scrape depuis 2 minutes"
+
+      # Argent encaisse par Stripe mais pas enregistre : a rembourser a la main (voir les logs
+      # de stripe-service pour le PaymentIntent).
+      - alert: PaymentNotRecorded
+        expr: increase(bagbuddy_payments_unrecorded_total[1h]) > 0
+        annotations:
+          summary: "Paiement Stripe non enregistre ({{ $labels.reason }}) : rembourser a la main"
+
+      # Poids reste pris sur une annonce apres une annulation : rejouer
+      # POST /trips/internal/{id}/release (voir les logs de transaction-service).
+      - alert: CapacityNotReleased
+        expr: increase(bagbuddy_capacity_release_failures_total[1h]) > 0
+        annotations:
+          summary: "Capacite non rendue apres {{ $labels.cause }}"
+
+      - alert: CircuitBreakerOpen
+        expr: resilience4j_circuitbreaker_state{state="open"} == 1
+        for: 1m
+        annotations:
+          summary: "Coupe-circuit {{ $labels.name }} ouvert sur {{ $labels.application }}"
+
+      - alert: DatabasePoolSaturated
+        expr: hikaricp_connections_pending > 0
+        for: 5m
+        annotations:
+          summary: "Requetes en attente d'une connexion sur {{ $labels.application }}"
+
+      - alert: HeapNearLimit
+        expr: sum by (application) (jvm_memory_used_bytes{area="heap"}) / sum by (application) (jvm_memory_max_bytes{area="heap"}) > 0.9
+        for: 10m
+        annotations:
+          summary: "Heap de {{ $labels.application }} au-dessus de 90 % depuis 10 minutes"

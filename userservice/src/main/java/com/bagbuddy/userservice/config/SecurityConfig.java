@@ -64,7 +64,7 @@ public class SecurityConfig {
                         // forward vers /error repasse par la chaine de securite, qui ne
                         // voit plus de jeton sur la requete interne.
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
-                        .requestMatchers("/actuator/health/**").permitAll()
+                        .requestMatchers("/actuator/health/**", "/actuator/prometheus").permitAll()
                         // Console GraphiQL : page statique, sans donnees.
                         .requestMatchers("/users/graphiql/**").permitAll()
                         // Le schema porte l'inscription, qui ne peut pas exiger de jeton : le

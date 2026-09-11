@@ -195,7 +195,7 @@ class TransactionSecurityTest {
     @Test
     void theSellerAcceptingIsWhatTakesTheWeightOutOfTheListing() throws Exception {
         Transaction tx = existingDeal();
-        when(tripClient.reserve(any(), any())).thenReturn(listing());
+        when(tripClient.reserve(any(), any(), any())).thenReturn(listing());
 
         mockMvc.perform(move(tx.getId(), Map.of(
                         "sellerStatus", "awaiting_payment", "buyerStatus", "payment_required"))
@@ -205,7 +205,8 @@ class TransactionSecurityTest {
 
         org.mockito.Mockito.verify(tripClient).reserve(
                 org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.argThat(w -> w.compareTo(new BigDecimal("2")) == 0));
+                org.mockito.ArgumentMatchers.argThat(w -> w.compareTo(new BigDecimal("2")) == 0),
+                org.mockito.ArgumentMatchers.eq(tx.getId()));
         assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getBuyerStatus())
                 .isEqualTo("payment_required");
     }
@@ -264,7 +265,7 @@ class TransactionSecurityTest {
         // L'annonce est lue pour tarifer, mais la capacite n'est pas encore prise :
         // elle ne sort du stock que lorsque le vendeur accepte.
         org.mockito.Mockito.verify(tripClient).fetch(1L);
-        org.mockito.Mockito.verify(tripClient, org.mockito.Mockito.never()).reserve(any(), any());
+        org.mockito.Mockito.verify(tripClient, org.mockito.Mockito.never()).reserve(any(), any(), any());
     }
 
     @Test

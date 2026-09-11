@@ -149,6 +149,9 @@ services:
       KC_DB_URL_DATABASE: ${KEYCLOAK_DB:-keycloak}
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      # 100 par defaut, la totalite du max_connections de Postgres. Les services metier en
+      # prennent 5 chacun (DB_POOL_MAX_SIZE) : 20 ici laisse de la marge pour psql et backup.sh.
+      KC_DB_POOL_MAX_SIZE: "20"
       # URL publique : c'est elle qui figure dans le 'iss' de chaque jeton, y compris ceux
       # que les services demandent en interne sur http://keycloak:8080.
       KC_HOSTNAME: https://${AUTH_DOMAIN}
@@ -266,6 +269,15 @@ services:
       TRIP_SERVICE_URL: http://trip-service:8082
       # PAYMENTS_REQUIRE_STRIPE n'est volontairement pas defini : il vaut true, et un
       # paiement n'est confirme que par le webhook Stripe signe.
+      # Notifications email des transitions : meme serveur SMTP que userservice.
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST manquant}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:?SMTP_USERNAME manquant}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD manquant}
+      SMTP_AUTH: "true"
+      SMTP_STARTTLS: "true"
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM manquant}
     depends_on: *service-depends-on
 
   review-service:
@@ -298,10 +310,53 @@ services:
       eureka-server:
         condition: service_healthy
 
+  # --- SUPERVISION (optionnelle) ---
+  # Hors du demarrage par defaut : --profile monitoring pour l'ajouter. Rien n'est publie sur
+  # Internet ; Grafana ecoute sur la boucle locale et s'ouvre par tunnel SSH, comme la console
+  # Keycloak (ssh -L 3000:localhost:3000 ...). Environ 300 Mo a eux deux.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    mem_limit: 256m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Quinze jours suffisent a comparer une semaine a la precedente sans remplir le disque.
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - bagbuddy
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      # Grafana exige de changer ce mot de passe a la premiere connexion s'il vaut 'admin'.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - bagbuddy
+
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  prometheus_data:
+  grafana_data:
 
 networks:
   bagbuddy:
