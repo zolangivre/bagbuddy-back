@@ -15,9 +15,12 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.io.IOException;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -80,8 +83,31 @@ public class KeycloakAdminClient {
         });
     }
 
-    public boolean passwordMatches(String username, String password) {
-        return run(() -> passwordMatchesInternal(username, password));
+    /** Whether {@code password} is the current password of the account {@code userId} (a sub). */
+    public boolean passwordMatches(String userId, String password) {
+        return run(() -> passwordMatchesInternal(userId, password));
+    }
+
+    /** The account registered under exactly this email, if any. */
+    public Optional<KeycloakUser> findUserByEmail(String email) {
+        return run(() -> findUserByEmailInternal(email));
+    }
+
+    /** The account behind a sub, or empty if it no longer exists. */
+    public Optional<KeycloakUser> findUser(String userId) {
+        return run(() -> findUserInternal(userId));
+    }
+
+    /** Ends every session of the account: refresh tokens held elsewhere stop working. */
+    public void logout(String userId) {
+        run(() -> {
+            keycloak.post()
+                    .uri("/admin/realms/{realm}/users/{id}/logout", realm, userId)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokenProvider.tokenValue())
+                    .retrieve()
+                    .toBodilessEntity();
+            return null;
+        });
     }
 
     private <T> T run(Supplier<T> call) {
@@ -168,27 +194,103 @@ public class KeycloakAdminClient {
      * Checks a password by asking Keycloak for a token with it. There is no admin endpoint
      * that verifies a password, and we would not want one: this way the realm's own brute
      * force protection sees the attempt.
+     *
+     * Two things keep this bound to the caller's own account rather than to a login name:
+     * the username is read from Keycloak by sub (a token's preferred_username can be stale
+     * after an email change, and by then may belong to somebody else), and the token Keycloak
+     * hands back must carry that same sub. Without the second check, the password of any
+     * account currently holding that username would be accepted.
      */
-    private boolean passwordMatchesInternal(String username, String password) {
+    private boolean passwordMatchesInternal(String userId, String password) {
+        String username = currentUsername(userId);
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("grant_type", "password");
         form.add("client_id", loginClientId);
         form.add("username", username);
         form.add("password", password);
         form.add("scope", "openid");
+        JsonNode response;
         try {
-            keycloak.post()
+            response = keycloak.post()
                     .uri("/realms/{realm}/protocol/openid-connect/token", realm)
                     .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                     .body(form)
                     .retrieve()
-                    .toBodilessEntity();
-            return true;
+                    .body(JsonNode.class);
         } catch (RestClientResponseException ex) {
             if (ex.getStatusCode().value() == 400 || ex.getStatusCode().value() == 401) {
                 return false;
             }
             throw ex;
+        }
+        return userId.equals(subjectOf(response));
+    }
+
+    /**
+     * {@code exact=true} matters: without it Keycloak searches by substring, and a request
+     * for {@code bob@example.com} could land on {@code jimbob@example.com}.
+     */
+    private Optional<KeycloakUser> findUserByEmailInternal(String email) {
+        JsonNode users = keycloak.get()
+                .uri("/admin/realms/{realm}/users?email={email}&exact=true", realm, email)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokenProvider.tokenValue())
+                .retrieve()
+                .body(JsonNode.class);
+        if (users == null || !users.isArray()) {
+            return Optional.empty();
+        }
+        for (JsonNode user : users) {
+            if (email.equalsIgnoreCase(user.path("email").asText(""))) {
+                return Optional.of(KeycloakUser.of(user));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private Optional<KeycloakUser> findUserInternal(String userId) {
+        try {
+            JsonNode user = keycloak.get()
+                    .uri("/admin/realms/{realm}/users/{id}", realm, userId)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokenProvider.tokenValue())
+                    .retrieve()
+                    .body(JsonNode.class);
+            return Optional.ofNullable(user).map(KeycloakUser::of);
+        } catch (RestClientResponseException ex) {
+            if (ex.getStatusCode().value() == 404) {
+                return Optional.empty();
+            }
+            throw ex;
+        }
+    }
+
+    private String currentUsername(String userId) {
+        JsonNode user = keycloak.get()
+                .uri("/admin/realms/{realm}/users/{id}", realm, userId)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokenProvider.tokenValue())
+                .retrieve()
+                .body(JsonNode.class);
+        String username = user == null ? null : user.path("username").asText(null);
+        if (username == null || username.isBlank()) {
+            throw new IllegalStateException("Keycloak returned no username for " + userId);
+        }
+        return username;
+    }
+
+    /**
+     * Reads {@code sub} from the access token without checking its signature: the token was
+     * just received from Keycloak itself, over this service's own connection, not from a client.
+     */
+    private String subjectOf(JsonNode tokenResponse) {
+        String accessToken = tokenResponse == null ? null : tokenResponse.path("access_token").asText(null);
+        String[] parts = accessToken == null ? new String[0] : accessToken.split("\\.");
+        if (parts.length < 2) {
+            throw new IllegalStateException("Keycloak returned no usable access token");
+        }
+        try {
+            JsonNode claims = objectMapper.readTree(Base64.getUrlDecoder().decode(parts[1]));
+            return claims.path("sub").asText(null);
+        } catch (IOException | IllegalArgumentException ex) {
+            throw new IllegalStateException("Keycloak returned an unreadable access token", ex);
         }
     }
 

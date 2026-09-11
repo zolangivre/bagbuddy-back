@@ -47,6 +47,10 @@ public class AccountService {
     /**
      * Changes name and email in Keycloak, then mirrors them locally so the profile is right
      * before the front has refreshed its token.
+     *
+     * The email is also the login name, so changing it takes the current password, like
+     * changing the password does: otherwise a session left open would be enough to move the
+     * account onto an address its holder can no longer sign in with.
      */
     @Transactional
     public User updateIdentity(Jwt caller, UpdateIdentityRequest request) {
@@ -55,6 +59,9 @@ public class AccountService {
         String firstName = request.getFirstName().trim();
         String lastName = request.getLastName().trim();
         boolean emailChanged = !email.equalsIgnoreCase(user.getEmail());
+        if (emailChanged) {
+            requireCurrentPassword(caller, request.getCurrentPassword());
+        }
 
         keycloak.updateIdentity(caller.getSubject(), email, firstName, lastName, emailChanged);
 
@@ -74,15 +81,20 @@ public class AccountService {
      * The current password is checked against Keycloak first.
      */
     public void changePassword(Jwt caller, ChangePasswordRequest request) {
-        String username = caller.getClaimAsString("preferred_username");
-        if (username == null || username.isBlank()) {
-            username = caller.getClaimAsString("email");
-        }
-        if (!keycloak.passwordMatches(username, request.getCurrentPassword())) {
+        requireCurrentPassword(caller, request.getCurrentPassword());
+        keycloak.resetPassword(caller.getSubject(), request.getNewPassword());
+    }
+
+    /**
+     * Checked against the caller's sub, never against a login name taken from the token: that
+     * claim can be stale, and the name it holds may since have been registered by someone else.
+     */
+    private void requireCurrentPassword(Jwt caller, String currentPassword) {
+        if (currentPassword == null || currentPassword.isBlank()
+                || !keycloak.passwordMatches(caller.getSubject(), currentPassword)) {
             throw new AccountException(HttpStatus.BAD_REQUEST, "invalid_current_password",
                     "The current password is incorrect.");
         }
-        keycloak.resetPassword(caller.getSubject(), request.getNewPassword());
     }
 
     private String normalize(String email) {

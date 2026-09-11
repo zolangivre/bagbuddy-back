@@ -21,4 +21,8 @@ public class UpdateIdentityRequest {
     @Email
     @Size(max = 255)
     private String email;
+
+    /** Required only when the email changes, since the email is also the login name. */
+    @Size(max = 128)
+    private String currentPassword;
 }

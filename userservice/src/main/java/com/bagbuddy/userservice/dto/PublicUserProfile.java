@@ -6,6 +6,9 @@ import lombok.Data;
 /**
  * What any authenticated user may see about somebody else. Deliberately excludes email,
  * phone and the Stripe account: those are contact/payout details, not public profile.
+ *
+ * The username is withheld too, except from the account holder: sign-up uses the email as
+ * the Keycloak username, so handing it out would hand out the email under another name.
  */
 @Data
 public class PublicUserProfile {
@@ -18,10 +21,10 @@ public class PublicUserProfile {
     private String bio;
     private String location;
 
-    public static PublicUserProfile of(User user) {
+    public static PublicUserProfile of(User user, boolean self) {
         PublicUserProfile dto = new PublicUserProfile();
         dto.sub = user.getSub();
-        dto.username = user.getUsername();
+        dto.username = self ? user.getUsername() : null;
         dto.name = user.getName();
         dto.givenName = user.getGivenName();
         dto.emailVerified = user.isEmailVerified();

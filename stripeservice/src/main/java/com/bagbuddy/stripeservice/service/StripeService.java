@@ -7,10 +7,13 @@ import com.stripe.model.Event;
 import com.stripe.model.PaymentIntent;
 import com.stripe.net.Webhook;
 import com.stripe.param.PaymentIntentCreateParams;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -18,16 +21,28 @@ import java.math.RoundingMode;
 @Service
 public class StripeService {
 
+    private static final Logger log = LoggerFactory.getLogger(StripeService.class);
+
     private final TransactionClient transactionClient;
     private final String currency;
     private final String webhookSecret;
+    private final String awaitingPaymentStatus;
+    private final String paymentRequiredStatus;
 
     public StripeService(TransactionClient transactionClient,
                          @Value("${bagbuddy.stripe.currency:eur}") String currency,
-                         @Value("${STRIPE_WEBHOOK_SECRET}") String webhookSecret) {
+                         @Value("${STRIPE_WEBHOOK_SECRET}") String webhookSecret,
+                         // Same keys as transactionservice's TransactionStatusProperties, so an
+                         // environment that renames a status renames it for both services.
+                         @Value("${bagbuddy.transaction.status.awaiting-payment:awaiting_payment}")
+                         String awaitingPaymentStatus,
+                         @Value("${bagbuddy.transaction.status.payment-required:payment_required}")
+                         String paymentRequiredStatus) {
         this.transactionClient = transactionClient;
         this.currency = currency;
         this.webhookSecret = webhookSecret;
+        this.awaitingPaymentStatus = awaitingPaymentStatus;
+        this.paymentRequiredStatus = paymentRequiredStatus;
     }
 
     /**
@@ -48,6 +63,12 @@ public class StripeService {
         }
         if (tx.getPaidAt() != null) {
             throw new IllegalArgumentException("Transaction " + transactionId + " is already paid");
+        }
+        // Only once the seller has accepted: the total is final from that point on, whereas a
+        // PaymentIntent created on a request could be paid after the booking has been re-priced.
+        if (!awaitingPaymentStatus.equals(tx.getSellerStatus())
+                || !paymentRequiredStatus.equals(tx.getBuyerStatus())) {
+            throw new IllegalArgumentException("Transaction " + transactionId + " is not awaiting payment");
         }
 
         long amountInMinorUnits = tx.getTotal()
@@ -97,10 +118,24 @@ public class StripeService {
         if (transactionId == null) {
             return;
         }
-        transactionClient.confirmPayment(
-                Long.valueOf(transactionId),
-                intent.getId(),
-                intent.getAmount(),
-                intent.getCurrency());
+        if (!currency.equalsIgnoreCase(intent.getCurrency())) {
+            log.error("PaymentIntent {} for transaction {} was paid in {} instead of {}: not recorded, "
+                    + "refund it manually", intent.getId(), transactionId, intent.getCurrency(), currency);
+            return;
+        }
+        try {
+            transactionClient.confirmPayment(
+                    Long.valueOf(transactionId),
+                    intent.getId(),
+                    intent.getAmount(),
+                    intent.getCurrency());
+        } catch (HttpClientErrorException.BadRequest ex) {
+            // transactionservice refused the payment for good (wrong state or amount): a retry
+            // from Stripe would be refused the same way, so the webhook is acknowledged. The money
+            // has been taken though, which is why this is an error and not a warning.
+            log.error("PaymentIntent {} for transaction {} was refused by transactionservice: not "
+                    + "recorded, refund it manually ({})", intent.getId(), transactionId,
+                    ex.getResponseBodyAsString());
+        }
     }
 }

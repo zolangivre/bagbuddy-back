@@ -3,10 +3,13 @@ package com.bagbuddy.userservice.controller;
 import com.bagbuddy.userservice.dto.ChangePasswordRequest;
 import com.bagbuddy.userservice.dto.PublicUserProfile;
 import com.bagbuddy.userservice.dto.RegisterRequest;
+import com.bagbuddy.userservice.dto.RequestPasswordResetRequest;
+import com.bagbuddy.userservice.dto.ResetPasswordRequest;
 import com.bagbuddy.userservice.dto.UpdateIdentityRequest;
 import com.bagbuddy.userservice.dto.UpdateProfileRequest;
 import com.bagbuddy.userservice.dto.UserProfile;
 import com.bagbuddy.userservice.service.AccountService;
+import com.bagbuddy.userservice.service.PasswordResetService;
 import com.bagbuddy.userservice.service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.graphql.data.method.annotation.Argument;
@@ -37,10 +40,13 @@ public class UserGraphQlController {
 
     private final UserService userService;
     private final AccountService accountService;
+    private final PasswordResetService passwordResetService;
 
-    public UserGraphQlController(UserService userService, AccountService accountService) {
+    public UserGraphQlController(UserService userService, AccountService accountService,
+                                 PasswordResetService passwordResetService) {
         this.userService = userService;
         this.accountService = accountService;
+        this.passwordResetService = passwordResetService;
     }
 
     @QueryMapping
@@ -53,15 +59,37 @@ public class UserGraphQlController {
     @PreAuthorize("isAuthenticated()")
     public PublicUserProfile user(@Argument String sub, @AuthenticationPrincipal Jwt jwt) {
         if (sub.equals(jwt.getSubject())) {
-            return PublicUserProfile.of(userService.currentProfile(jwt));
+            return PublicUserProfile.of(userService.currentProfile(jwt), true);
         }
-        return PublicUserProfile.of(userService.publicProfile(sub));
+        return PublicUserProfile.of(userService.publicProfile(sub), false);
     }
 
-    /** La seule operation anonyme du projet. Voir la note de securite de la classe. */
+    /** Operation anonyme, comme les deux de reinitialisation. Voir la note de securite de la classe. */
     @MutationMapping
     public boolean register(@Argument @Valid RegisterRequest input) {
         accountService.register(input);
+        return true;
+    }
+
+    /**
+     * Anonyme par nature : qui a oublie son mot de passe n'a pas de jeton. L'annotation est
+     * explicite pour qu'une operation sans @PreAuthorize reste, a la lecture, un oubli.
+     *
+     * Repond toujours true, compte ou pas, et avant meme de l'avoir cherche : ni le contenu ni
+     * le temps de reponse ne doivent dire qui est inscrit.
+     */
+    @MutationMapping
+    @PreAuthorize("permitAll()")
+    public boolean requestPasswordReset(@Argument @Valid RequestPasswordResetRequest input) {
+        passwordResetService.requestReset(input);
+        return true;
+    }
+
+    /** Anonyme : c'est le jeton du lien envoye par email qui designe le compte. */
+    @MutationMapping
+    @PreAuthorize("permitAll()")
+    public boolean resetPassword(@Argument @Valid ResetPasswordRequest input) {
+        passwordResetService.resetPassword(input);
         return true;
     }
 

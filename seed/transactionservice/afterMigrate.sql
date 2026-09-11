@@ -98,14 +98,14 @@ BEGIN
         total_weight_available, remaining_weight, price_per_kg, conditions, created_at,
         seller_sub, seller_email, seller_email_verified, seller_given_name, seller_family_name, seller_name,
         seller_username, seller_bio, seller_location, seller_phone)
-    SELECT b.id, l.id, bp.sub, sp.sub, s.seller_status, s.buyer_status, b.weight, round(l.price_per_kg * b.weight, 2),
+    SELECT b.id, l.id, bp.sub, sp.sub, s.seller_status, s.buyer_status, b.weight, v.total,
            b.seller_review, b.buyer_review,
            -- Faux paiement Stripe : ce que le webhook signe aurait ecrit.
            CASE WHEN s.paid THEN 'pi_seed_' || lpad(b.id::text, 6, '0') END,
            CASE WHEN s.paid THEN 'eur' END,
-           CASE WHEN s.paid THEN (round(l.price_per_kg * b.weight, 2) * 100)::bigint END,
-           CASE WHEN s.paid THEN now() - make_interval(days => b.created_days_ago) + interval '1 day' END,
-           now() - make_interval(days => b.created_days_ago),
+           CASE WHEN s.paid THEN (v.total * 100)::bigint END,
+           CASE WHEN s.paid THEN v.created_at + interval '1 day' END,
+           v.created_at,
            bp.sub, bp.email, true, bp.given_name, bp.family_name, bp.given_name || ' ' || bp.family_name,
            bp.email, bp.bio, bp.location, bp.phone,
            -- Format de LocalDateTime.toString(), comme listingInfoOf() l'ecrit.
@@ -120,7 +120,9 @@ BEGIN
     JOIN listing l ON l.id = b.listing_id
     JOIN state s ON s.name = b.state
     JOIN person bp ON bp.n = b.buyer
-    JOIN person sp ON sp.n = l.seller;
+    JOIN person sp ON sp.n = l.seller
+    CROSS JOIN LATERAL (SELECT round(l.price_per_kg * b.weight, 2) AS total,
+                               now() - make_interval(days => b.created_days_ago) AS created_at) v;
 
     PERFORM setval(pg_get_serial_sequence('transaction_record', 'id'), (SELECT max(id) FROM transaction_record));
 END $$;

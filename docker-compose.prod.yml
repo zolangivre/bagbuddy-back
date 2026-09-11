@@ -10,28 +10,57 @@
 # - Keycloak en mode production, sans les comptes de demo ni les donnees de seed/ ;
 # - pas de Zipkin ni de GraphiQL, memoire de chaque JVM plafonnee.
 
+x-java-healthcheck: &java-healthcheck
+  # PORT est defini dans l'environnement de chaque JVM.
+  test: ["CMD-SHELL", "wget --spider -q http://localhost:$${PORT}/actuator/health"]
+  interval: 15s
+  timeout: 5s
+  retries: 20
+  # start_period large : huit JVM qui demarrent ensemble sur deux coeurs ARM mettent
+  # plusieurs minutes. start_interval sonde toutes les 2 s pendant ce temps, pour qu'un
+  # depends_on n'attende pas le prochain intervalle de 15 s (Docker Engine >= 25).
+  start_period: 180s
+  start_interval: 2s
+
 x-java-service: &java-service
   restart: unless-stopped
   mem_limit: 640m
+  healthcheck: *java-healthcheck
   networks:
     - bagbuddy
 
-# Variables communes aux services metier. Les ancres YAML ne fusionnent pas les listes,
-# d'ou la forme dictionnaire des blocs environment.
-x-java-env: &java-env
+# Les ancres YAML ne fusionnent pas les listes, d'ou la forme dictionnaire des blocs
+# environment. Trois niveaux : toute JVM, tout client Eureka, tout service metier.
+x-jvm-env: &jvm-env
   # Heap a 65 % du plafond du conteneur : le reste va au metaspace, aux threads et au
   # code compile. Au-dela, le noyau tue la JVM sans message cote Java.
   JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+  MANAGEMENT_TRACING_ENABLED: "false"
+
+x-eureka-client-env: &eureka-client-env
+  <<: *jvm-env
   EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
   # Cadences elargies par rapport au dev (5 s) sans revenir aux 30/90 s par defaut.
   EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "10"
   EUREKA_INSTANCE_LEASERENEWALINTERVALINSECONDS: "10"
   EUREKA_INSTANCE_LEASEEXPIRATIONDURATIONINSECONDS: "30"
-  MANAGEMENT_TRACING_ENABLED: "false"
+
+x-java-env: &java-env
+  <<: *eureka-client-env
   JWT_ISSUER_URIS: https://${AUTH_DOMAIN:?AUTH_DOMAIN manquant}/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
   JWT_JWK_SET_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
   JWT_AUDIENCE: bagbuddy-api
   KEYCLOAK_TOKEN_URI: http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+
+# Keycloak n'est attendu que demarre, pas pret : le decodeur JWT charge les cles au
+# premier jeton (jwk-set-uri) et aucun service ne l'appelle au boot.
+x-service-depends-on: &service-depends-on
+  postgres:
+    condition: service_healthy
+  keycloak:
+    condition: service_started
+  eureka-server:
+    condition: service_healthy
 
 services:
   # --- REVERSE PROXY ---
@@ -109,12 +138,13 @@ services:
 
   # --- KEYCLOAK ---
   keycloak:
-    image: quay.io/keycloak/keycloak:25.0.0
+    # keycloak/Dockerfile fige les options de build (base postgres, health) : --optimized
+    # evite de refaire le build Quarkus a chaque creation du conteneur.
+    build: ./keycloak
     restart: unless-stopped
     mem_limit: 1g
-    command: start --import-realm
+    command: start --optimized --import-realm
     environment:
-      KC_DB: postgres
       KC_DB_URL_HOST: postgres
       KC_DB_URL_DATABASE: ${KEYCLOAK_DB:-keycloak}
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
@@ -128,7 +158,6 @@ services:
       # TLS termine par Caddy, qui transmet X-Forwarded-*.
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
-      KC_HEALTH_ENABLED: "true"
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:?KEYCLOAK_ADMIN manquant}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD manquant}
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET:?KEYCLOAK_SERVICE_CLIENT_SECRET manquant}
@@ -147,6 +176,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 120s
+      start_interval: 2s
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,8 +189,8 @@ services:
     build: ./eurekaserver
     mem_limit: 450m
     environment:
-      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
-      MANAGEMENT_TRACING_ENABLED: "false"
+      <<: *jvm-env
+      PORT: "8761"
       # L'auto-preservation reste coupee meme ici : sur une seule machine il n'y a pas de
       # coupure reseau dont elle protegerait, et avec six instances le redemarrage d'une
       # seule suffit a passer sous son seuil de 85 % -- le registre garderait alors
@@ -168,33 +198,17 @@ services:
       EUREKA_SERVER_ENABLESELFPRESERVATION: "false"
       EUREKA_SERVER_EVICTIONINTERVALTIMERINMS: "15000"
       EUREKA_SERVER_RESPONSECACHEUPDATEINTERVALMS: "10000"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8761/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 120s
 
   # --- API GATEWAY ---
   api-gateway:
     <<: *java-service
     build: ./apigateway
     environment:
-      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
-      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
-      EUREKA_CLIENT_REGISTRYFETCHINTERVALSECONDS: "10"
-      EUREKA_INSTANCE_LEASERENEWALINTERVALINSECONDS: "10"
-      EUREKA_INSTANCE_LEASEEXPIRATIONDURATIONINSECONDS: "30"
+      <<: *eureka-client-env
+      PORT: "8080"
       SPRING_CLOUD_LOADBALANCER_CACHE_TTL: 10s
-      MANAGEMENT_TRACING_ENABLED: "false"
       REDIS_HOST: redis
       CORS_ALLOWED_ORIGINS: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
     depends_on:
       eureka-server:
         condition: service_healthy
@@ -202,8 +216,6 @@ services:
         condition: service_healthy
 
   # --- SERVICES METIER ---
-  # start_period large : huit JVM qui demarrent ensemble sur deux coeurs ARM mettent
-  # plusieurs minutes, et un healthcheck trop presse ferait echouer les depends_on.
   user-service:
     <<: *java-service
     build: ./userservice
@@ -218,19 +230,16 @@ services:
       KEYCLOAK_ACCOUNTS_CLIENT_ID: bagbuddy-accounts
       KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
       KEYCLOAK_LOGIN_CLIENT_ID: bagbuddy-web
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      # Emails de compte (mot de passe oublie) : sans SMTP, aucun lien ne partirait.
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST manquant}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:?SMTP_USERNAME manquant}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD manquant}
+      SMTP_AUTH: "true"
+      SMTP_STARTTLS: "true"
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM manquant}
+    depends_on: *service-depends-on
 
   trip-service:
     <<: *java-service
@@ -241,19 +250,7 @@ services:
       DATABASE_URL: jdbc:postgresql://postgres:5432/${TRIP_SERVICE_DB:-tripservice}
       SPRING_DATASOURCE_USERNAME: ${TRIP_SERVICE_USER:-tripservice}
       SPRING_DATASOURCE_PASSWORD: ${TRIP_SERVICE_PASSWORD}
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+    depends_on: *service-depends-on
 
   transaction-service:
     <<: *java-service
@@ -269,19 +266,7 @@ services:
       TRIP_SERVICE_URL: http://trip-service:8082
       # PAYMENTS_REQUIRE_STRIPE n'est volontairement pas defini : il vaut true, et un
       # paiement n'est confirme que par le webhook Stripe signe.
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+    depends_on: *service-depends-on
 
   review-service:
     <<: *java-service
@@ -293,19 +278,7 @@ services:
       SPRING_DATASOURCE_USERNAME: ${REVIEW_SERVICE_USER:-reviewservice}
       SPRING_DATASOURCE_PASSWORD: ${REVIEW_SERVICE_PASSWORD}
       TRANSACTION_SERVICE_URL: http://transaction-service:8083
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+    depends_on: *service-depends-on
 
   stripe-service:
     <<: *java-service
@@ -319,15 +292,9 @@ services:
       KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
       TRANSACTION_SERVICE_URL: http://transaction-service:8083
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/actuator/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 180s
     depends_on:
       keycloak:
-        condition: service_healthy
+        condition: service_started
       eureka-server:
         condition: service_healthy
 

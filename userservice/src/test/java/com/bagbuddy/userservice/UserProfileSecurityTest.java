@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -195,11 +196,58 @@ class UserProfileSecurityTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.errors[0].extensions.classification").value("ValidationError"));
 
-        mockMvc.perform(graphql("query($s: String!) { user(sub: $s) { bio name } }",
+        mockMvc.perform(graphql("query($s: String!) { user(sub: $s) { bio name username } }",
                         Map.of("s", ALICE)).with(jwt().jwt(j -> j.subject(BOB))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.user.bio").value("Bonjour"))
-                .andExpect(jsonPath("$.data.user.name").value("Alice Martin"));
+                .andExpect(jsonPath("$.data.user.name").value("Alice Martin"))
+                // Le username est l'email choisi a l'inscription : il ne sort pas non plus.
+                .andExpect(jsonPath("$.data.user.username").doesNotExist());
+    }
+
+    @Test
+    void thePasswordIsCheckedAgainstTheCallersSubNotTheUsernameClaim() throws Exception {
+        signInAlice();
+        org.mockito.Mockito.when(keycloakAdminClient.passwordMatches(ALICE, "motdepasse123"))
+                .thenReturn(true);
+
+        // Le claim preferred_username pointe vers un autre compte : il ne doit pas compter.
+        var staleAlice = jwt().jwt(j -> j.subject(ALICE)
+                .claim("email", "alice@example.com")
+                .claim("preferred_username", "bob@example.com"));
+
+        mockMvc.perform(graphql("mutation($i: ChangePasswordInput!) { changePassword(input: $i) }",
+                        Map.of("i", Map.of("currentPassword", "motdepasse123",
+                                "newPassword", "nouveaumotdepasse"))).with(staleAlice))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.changePassword").value(true));
+
+        org.mockito.Mockito.verify(keycloakAdminClient).passwordMatches(eq(ALICE), eq("motdepasse123"));
+        org.mockito.Mockito.verify(keycloakAdminClient).resetPassword(eq(ALICE), eq("nouveaumotdepasse"));
+    }
+
+    @Test
+    void changingTheEmailRequiresTheCurrentPassword() throws Exception {
+        signInAlice();
+        var alice = jwt().jwt(j -> j.subject(ALICE)
+                .claim("email", "alice@example.com")
+                .claim("preferred_username", "alice"));
+        String mutation = "mutation($i: UpdateIdentityInput!) { updateIdentity(input: $i) { email } }";
+
+        mockMvc.perform(graphql(mutation, Map.of("i", Map.of(
+                        "firstName", "Alice", "lastName", "Martin", "email", "new@example.com")))
+                        .with(alice))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
+        org.mockito.Mockito.verify(keycloakAdminClient, org.mockito.Mockito.never())
+                .updateIdentity(any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+
+        // Un simple changement de nom, lui, ne demande rien de plus.
+        mockMvc.perform(graphql(mutation, Map.of("i", Map.of(
+                        "firstName", "Alicia", "lastName", "Martin", "email", "alice@example.com")))
+                        .with(alice))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors").doesNotExist());
     }
 
     @Test

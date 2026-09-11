@@ -36,6 +36,8 @@ public class TransactionClient {
                     buyerId
                     sellerId
                     total
+                    sellerStatus
+                    buyerStatus
                     paidAt
                 }
             }

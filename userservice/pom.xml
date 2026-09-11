@@ -63,6 +63,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-oauth2-client</artifactId>
         </dependency>
+        <!-- Emails de compte (reinitialisation du mot de passe) : Keycloak sait les
+             envoyer, mais ses liens ouvrent ses propres pages, que le front web ne
+             montre jamais. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
         <!-- Coupe-circuit sur les appels sortants vers Keycloak. -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>

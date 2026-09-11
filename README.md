@@ -145,6 +145,16 @@ docker compose -f docker-compose.dev.yml down -v   # ⚠️ efface toutes les ba
 docker compose -f docker-compose.dev.yml up --build -d
 ```
 
+Vérifie que `down -v` affiche bien des lignes `Volume bagbuddy-back_…_pgdata Removed`.
+Sans elles, rien n'a été effacé : `up` redémarre alors les anciens conteneurs
+Postgres avec leurs données, et le seed ne se charge pas puisque les tables ne
+sont pas vides. Le cas le plus courant : Docker Desktop n'était pas encore
+démarré au moment du `down`. Pour contrôler après coup :
+
+```bash
+docker volume inspect -f '{{.CreatedAt}}' bagbuddy-back_trip_pgdata   # doit dater de la remise à zéro
+```
+
 ## Stripe en local
 
 `stripe-service` fait partie de la stack de dev. Il lui faut les **clés de

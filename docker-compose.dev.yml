@@ -29,6 +29,17 @@ services:
     networks:
       - bagbuddy-network
 
+  # --- EMAILS ---
+  # Faux serveur SMTP : userservice y envoie les emails de compte (mot de passe oublie),
+  # qui ne partent nulle part et se lisent sur http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27
+    container_name: mailpit
+    ports:
+      - "8025:8025"
+    networks:
+      - bagbuddy-network
+
   # --- RATE LIMITING ---
   # Compteurs du RequestRateLimiter du gateway. Sans persistance : les quotas
   # repartent de zero a chaque redemarrage, ce qui convient au dev.
@@ -153,6 +164,10 @@ services:
       - KEYCLOAK_ACCOUNTS_CLIENT_ID=bagbuddy-accounts
       - KEYCLOAK_ACCOUNTS_CLIENT_SECRET=${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
       - KEYCLOAK_LOGIN_CLIENT_ID=bagbuddy-web
+      # Emails de compte : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
     volumes:
       - ./seed/userservice:/seed:ro
     ports:

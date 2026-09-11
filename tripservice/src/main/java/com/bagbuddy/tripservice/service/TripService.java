@@ -104,7 +104,11 @@ public class TripService {
         existingTrip.setTotalWeightAvailable(tripDetails.getTotalWeightAvailable());
         existingTrip.setPricePerKg(tripDetails.getPricePerKg());
         existingTrip.setConditions(tripDetails.getConditions());
-        existingTrip.setStripeAccountId(tripDetails.getStripeAccountId());
+        // Omis = inchange, comme dans userservice : le front web ne lit ni n'envoie ce champ, et
+        // modifier les dates d'une annonce effacait jusqu'ici son compte de paiement.
+        if (tripDetails.getStripeAccountId() != null) {
+            existingTrip.setStripeAccountId(tripDetails.getStripeAccountId());
+        }
 
         // userId / userInfo are deliberately not copied: ownership is immutable.
         return tripRepository.save(existingTrip);

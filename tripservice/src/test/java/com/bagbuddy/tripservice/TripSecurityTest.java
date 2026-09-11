@@ -16,6 +16,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -68,6 +69,8 @@ class TripSecurityTest {
         UserInfo info = new UserInfo();
         info.setSub(ALICE);
         info.setEmail("alice@example.com");
+        // A l'inscription, l'email sert de nom d'utilisateur Keycloak.
+        info.setUsername("alice@example.com");
         info.setPhone("+33600000000");
         info.setName("Alice");
 
@@ -95,10 +98,11 @@ class TripSecurityTest {
     void otherMembersDoNotSeeContactDetailsOrPayoutAccount() throws Exception {
         aliceTrip();
 
-        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { name email phone } } }")
+        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { name username email phone } } }")
                         .with(jwt().jwt(j -> j.subject(BOB))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.trips[0].userInfo.name").value("Alice"))
+                .andExpect(jsonPath("$.data.trips[0].userInfo.username").doesNotExist())
                 .andExpect(jsonPath("$.data.trips[0].userInfo.email").doesNotExist())
                 .andExpect(jsonPath("$.data.trips[0].userInfo.phone").doesNotExist())
                 .andExpect(jsonPath("$.data.trips[0].stripeAccountId").doesNotExist());
@@ -108,9 +112,10 @@ class TripSecurityTest {
     void ownerStillSeesTheirOwnContactDetails() throws Exception {
         aliceTrip();
 
-        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { email } } }")
+        mockMvc.perform(graphql("{ trips { stripeAccountId userInfo { username email } } }")
                         .with(jwt().jwt(j -> j.subject(ALICE))))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.trips[0].userInfo.username").value("alice@example.com"))
                 .andExpect(jsonPath("$.data.trips[0].userInfo.email").value("alice@example.com"))
                 .andExpect(jsonPath("$.data.trips[0].stripeAccountId").value("acct_alice"));
     }
@@ -170,6 +175,42 @@ class TripSecurityTest {
                         .with(jwt().jwt(j -> j.subject(BOB))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.errors[0].extensions.classification").value("ValidationError"));
+    }
+
+    @Test
+    void updatingATripWithoutPayoutAccountKeepsTheStoredOne() throws Exception {
+        Trip trip = aliceTrip();
+        String update = """
+                mutation($id: ID!, $input: TripInput!) { updateTrip(id: $id, input: $input) { id } }
+                """;
+        Map<String, Object> input = Map.of(
+                "departureAirport", "ORY",
+                "arrivalAirport", "JFK",
+                "departureDate", LocalDateTime.now().plusDays(12).toString(),
+                "arrivalDate", LocalDateTime.now().plusDays(13).toString(),
+                "totalWeightAvailable", 20,
+                "pricePerKg", 14);
+
+        // Ce que le front web envoie : aucun stripeAccountId.
+        mockMvc.perform(graphql(update, Map.of("id", trip.getId(), "input", input))
+                        .with(jwt().jwt(j -> j.subject(ALICE))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors").doesNotExist());
+
+        Trip stored = tripRepository.findById(trip.getId()).orElseThrow();
+        assertThat(stored.getDepartureAirport()).isEqualTo("ORY");
+        assertThat(stored.getStripeAccountId()).isEqualTo("acct_alice");
+
+        // Un compte fourni explicitement remplace toujours l'ancien.
+        Map<String, Object> withAccount = new HashMap<>(input);
+        withAccount.put("stripeAccountId", "acct_alice_2");
+        mockMvc.perform(graphql(update, Map.of("id", trip.getId(), "input", withAccount))
+                        .with(jwt().jwt(j -> j.subject(ALICE))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors").doesNotExist());
+
+        assertThat(tripRepository.findById(trip.getId()).orElseThrow().getStripeAccountId())
+                .isEqualTo("acct_alice_2");
     }
 
     @Test

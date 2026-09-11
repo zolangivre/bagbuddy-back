@@ -291,11 +291,69 @@ class TransactionSecurityTest {
         org.mockito.Mockito.verify(tripClient, org.mockito.Mockito.never()).fetch(any());
     }
 
+    private MockHttpServletRequestBuilder recordPayment(Long id, long amount) {
+        return post("/transactions/internal/" + id + "/payment")
+                .with(jwt().jwt(j -> j.subject("stripeservice"))
+                        .authorities(new SimpleGrantedAuthority("ROLE_SERVICE")))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"paymentIntentId":"pi_test","amount":%d,"currency":"eur"}
+                        """.formatted(amount));
+    }
+
+    @Test
+    void aPaymentIsOnlyRecordedWhileTheDealAwaitsIt() throws Exception {
+        // Encore au stade de la demande : un PaymentIntent paye maintenant pourrait couvrir
+        // une reservation re-tarifee plus tard.
+        Transaction tx = existingDeal();
+
+        mockMvc.perform(recordPayment(tx.getId(), 2500)).andExpect(status().isBadRequest());
+        assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getPaidAt()).isNull();
+    }
+
+    @Test
+    void aPaymentForLessThanTheTotalIsNotRecorded() throws Exception {
+        Transaction tx = existingDeal();
+        tx.setSellerStatus("awaiting_payment");
+        tx.setBuyerStatus("payment_required");
+        transactionRepository.save(tx);
+
+        // 1,00 EUR pour un total de 25,00 EUR.
+        mockMvc.perform(recordPayment(tx.getId(), 100)).andExpect(status().isBadRequest());
+        assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getPaidAt()).isNull();
+
+        mockMvc.perform(move(tx.getId(), Map.of("sellerStatus", "confirmed", "buyerStatus", "confirmed"))
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
+    }
+
+    @Test
+    void aRecordedPaymentThatNoLongerCoversTheTotalDoesNotConfirm() throws Exception {
+        // Donnee heritee : un paiement enregistre pour un montant qui n'est plus le total.
+        Transaction tx = existingDeal();
+        tx.setSellerStatus("awaiting_payment");
+        tx.setBuyerStatus("payment_required");
+        tx.setPaidAt(LocalDateTime.now());
+        tx.setStripeAmount(100L);
+        transactionRepository.save(tx);
+
+        mockMvc.perform(move(tx.getId(), Map.of("sellerStatus", "confirmed", "buyerStatus", "confirmed"))
+                        .with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
+        assertThat(transactionRepository.findById(tx.getId()).orElseThrow().getBuyerStatus())
+                .isEqualTo("payment_required");
+    }
+
     @Test
     void paymentFieldsAreOnlyWritableThroughTheServiceRole() throws Exception {
         Transaction tx = existingDeal();
+        tx.setSellerStatus("awaiting_payment");
+        tx.setBuyerStatus("payment_required");
+        transactionRepository.save(tx);
         String payload = """
-                {"paymentIntentId":"pi_forged","amount":1,"currency":"eur"}
+                {"paymentIntentId":"pi_forged","amount":2500,"currency":"eur"}
                 """;
 
         mockMvc.perform(post("/transactions/internal/" + tx.getId() + "/payment")

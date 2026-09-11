@@ -58,7 +58,24 @@ class StripeSecurityTest {
         snapshot.setBuyerId(BUYER);
         snapshot.setSellerId(SELLER);
         snapshot.setTotal(new BigDecimal("25.00"));
+        snapshot.setSellerStatus("awaiting_payment");
+        snapshot.setBuyerStatus("payment_required");
         return snapshot;
+    }
+
+    @Test
+    void aDealTheSellerHasNotAcceptedCannotBeCharged() throws Exception {
+        // Tant que le vendeur n'a pas accepte, le total peut encore changer (re-tarification).
+        TransactionSnapshot requested = unpaidDeal();
+        requested.setSellerStatus("reservation_received");
+        requested.setBuyerStatus("waiting_for_response");
+        when(transactionClient.fetchAsCaller(any(), anyString())).thenReturn(requested);
+
+        mockMvc.perform(graphql("""
+                        mutation($id: ID!) { createPaymentIntent(transactionId: $id) { clientSecret } }
+                        """, Map.of("id", 1)).with(jwt().jwt(j -> j.subject(BUYER))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));
     }
 
     @Test

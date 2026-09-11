@@ -56,9 +56,9 @@ type Trip {
 }
 
 """
-Instantane du voyageur tel qu'il est expose. email et phone ne sont renseignes que pour le
-proprietaire de l'annonce : les listes sont lisibles par tout membre authentifie et ne doivent
-pas distribuer le carnet d'adresses.
+Instantane du voyageur tel qu'il est expose. username, email et phone ne sont renseignes que
+pour le proprietaire de l'annonce : les listes sont lisibles par tout membre authentifie et ne
+doivent pas distribuer le carnet d'adresses (le username est l'email choisi a l'inscription).
 """
 type UserInfoView {
     sub: String
@@ -81,6 +81,8 @@ input TripInput {
     totalWeightAvailable: BigDecimal
     pricePerKg: BigDecimal
     conditions: String
+
+    "Omis ou null a la modification : le compte deja enregistre sur l'annonce est conserve."
     stripeAccountId: String
 
     """

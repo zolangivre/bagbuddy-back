@@ -259,25 +259,48 @@ public class TransactionService {
     /**
      * Confirming a payment. With Stripe wired in, the transaction must already carry the
      * paidAt written by the signed webhook -- the browser saying "I paid" is not evidence.
+     * And a paidAt alone is not enough either: the amount Stripe charged must still be the
+     * total owed, or a small payment could be carried over to a larger booking.
      */
     private void settlePayment(Transaction existing) {
-        if (existing.getPaidAt() != null) {
+        if (requireStripe) {
+            if (existing.getPaidAt() == null) {
+                throw new IllegalArgumentException(
+                        "Payment has not been confirmed by Stripe for transaction " + existing.getId());
+            }
+            if (!Long.valueOf(minorUnits(existing.getTotal())).equals(existing.getStripeAmount())) {
+                throw new IllegalArgumentException(
+                        "The recorded payment does not cover the total of transaction " + existing.getId());
+            }
             return;
         }
-        if (requireStripe) {
-            throw new IllegalArgumentException(
-                    "Payment has not been confirmed by Stripe for transaction " + existing.getId());
+        if (existing.getPaidAt() == null) {
+            existing.setPaidAt(LocalDateTime.now());
         }
-        existing.setPaidAt(LocalDateTime.now());
     }
 
-    /** Called only by the Stripe webhook, through the service-role internal endpoint. */
+    /**
+     * Called only by the Stripe webhook, through the service-role internal endpoint.
+     *
+     * A payment is only recorded against a transaction that is actually waiting for it, and only
+     * for the exact total: a PaymentIntent created earlier, for a smaller amount, must not be
+     * able to settle a booking that has since been re-priced. Refusals are IllegalArgumentException
+     * (400), which stripeservice treats as final rather than asking Stripe to retry.
+     */
     @Transactional
     public Transaction markPaid(Long id, String paymentIntentId, Long amount, String currency) {
-        Transaction tx = findOrThrow(id);
+        Transaction tx = transactionRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
         if (tx.getPaidAt() != null) {
             // Stripe retries webhooks; recording the same payment twice must be a no-op.
             return tx;
+        }
+        if (!stateMachine.awaitingPaymentPair().equals(pairOf(tx))) {
+            throw new IllegalArgumentException("Transaction " + id + " is not awaiting payment");
+        }
+        if (amount == null || amount != minorUnits(tx.getTotal())) {
+            throw new IllegalArgumentException(
+                    "Paid amount " + amount + " does not match the total of transaction " + id);
         }
         tx.setStripePaymentIntentId(paymentIntentId);
         tx.setStripeAmount(amount);
@@ -296,6 +319,14 @@ public class TransactionService {
     private Transaction findOrThrow(Long id) {
         return transactionRepository.findById(id)
                 .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
+    }
+
+    /** Same conversion stripeservice uses to build the PaymentIntent amount. */
+    private static long minorUnits(BigDecimal total) {
+        if (total == null) {
+            throw new IllegalArgumentException("Transaction has no total");
+        }
+        return total.setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact();
     }
 
     private void requireParticipant(Transaction tx, String callerSub) {

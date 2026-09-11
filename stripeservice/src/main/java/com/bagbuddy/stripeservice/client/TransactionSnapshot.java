@@ -13,5 +13,7 @@ public class TransactionSnapshot {
     private String buyerId;
     private String sellerId;
     private BigDecimal total;
+    private String sellerStatus;
+    private String buyerStatus;
     private LocalDateTime paidAt;
 }

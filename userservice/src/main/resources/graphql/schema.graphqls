@@ -24,11 +24,27 @@ type Mutation {
     "Champs libres du profil. L'identite n'est pas modifiable ici, par construction."
     updateProfile(input: UpdateProfileInput!): UserProfile!
 
-    "Nom et email, portes par Keycloak. Un changement d'email repasse par une verification."
+    """
+    Nom et email, portes par Keycloak. Un changement d'email exige le mot de passe actuel et
+    repasse par une verification.
+    """
     updateIdentity(input: UpdateIdentityInput!): UserProfile!
 
     "Le mot de passe actuel est exige : une session ouverte ne suffit pas a en changer."
     changePassword(input: ChangePasswordInput!): Boolean!
+
+    """
+    Mot de passe oublie, sans jeton. Envoie un lien vers le front si l'email correspond a un
+    compte actif, et repond true dans tous les cas : la reponse ne dit pas qui est inscrit.
+    """
+    requestPasswordReset(input: RequestPasswordResetInput!): Boolean!
+
+    """
+    Pose un nouveau mot de passe a partir du jeton du lien, sans jeton d'acces. Le lien ne sert
+    qu'une fois, et toutes les sessions ouvertes du compte sont fermees. Lien inconnu, expire,
+    deja utilise, ou envoye a une adresse que le compte n'a plus : code invalid_reset_token.
+    """
+    resetPassword(input: ResetPasswordInput!): Boolean!
 }
 
 "Profil complet. N'est jamais renvoye qu'a son proprietaire."
@@ -49,6 +65,7 @@ type UserProfile {
 "Ce que tout membre authentifie peut voir d'un autre."
 type PublicUserProfile {
     sub: String
+    "Nul sauf pour l'appelant lui-meme : le nom d'utilisateur est l'adresse email."
     username: String
     name: String
     givenName: String
@@ -77,9 +94,25 @@ input UpdateIdentityInput {
     firstName: String!
     lastName: String!
     email: String!
+
+    "Exige seulement si l'email change : l'email est aussi l'identifiant de connexion."
+    currentPassword: String
 }
 
 input ChangePasswordInput {
     currentPassword: String!
+    newPassword: String!
+}
+
+input RequestPasswordResetInput {
+    email: String!
+
+    "Langue de l'email : en ou fr, celle du visiteur sur le front. Anglais par defaut."
+    language: String
+}
+
+input ResetPasswordInput {
+    "Le jeton porte par le lien de l'email."
+    token: String!
     newPassword: String!
 }

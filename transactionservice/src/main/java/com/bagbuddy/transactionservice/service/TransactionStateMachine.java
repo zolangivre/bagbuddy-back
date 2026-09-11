@@ -37,6 +37,7 @@ public class TransactionStateMachine {
 
     private final List<Transition> transitions;
     private final StatusPair initial;
+    private final StatusPair awaitingPayment;
 
     public TransactionStateMachine(TransactionStatusProperties status) {
 
@@ -48,6 +49,7 @@ public class TransactionStateMachine {
         StatusPair cancelled = new StatusPair(status.getCancelled(), status.getCancelled());
 
         this.initial = requested;
+        this.awaitingPayment = accepted;
         this.transitions = List.of(
                 // The buyer asks again with a different weight after a refusal: re-priced server-side.
                 new Transition(rejected, requested, List.of(Actor.BUYER), Effect.REPRICE),
@@ -66,6 +68,11 @@ public class TransactionStateMachine {
 
     public StatusPair initialPair() {
         return initial;
+    }
+
+    /** The only pair in which a payment may be recorded: the seller has accepted, the buyer owes. */
+    public StatusPair awaitingPaymentPair() {
+        return awaitingPayment;
     }
 
     /**
