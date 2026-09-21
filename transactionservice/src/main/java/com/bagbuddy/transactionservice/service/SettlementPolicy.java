@@ -57,8 +57,7 @@ public class SettlementPolicy {
     }
 
     public Plan onCompletion(long charged) {
-        long fee = percentOf(charged, platformFeePercent);
-        return new Plan(0, fee, charged - fee);
+        return split(0, charged);
     }
 
     /**
@@ -71,7 +70,14 @@ public class SettlementPolicy {
                 && departure != null
                 && Duration.between(now, departure).compareTo(lateCancellationWindow) < 0;
         long refund = late ? percentOf(charged, lateCancellationRefundPercent) : charged;
-        long retained = charged - refund;
+        return split(refund, charged - refund);
+    }
+
+    /**
+     * La commission ne porte jamais sur ce qui est rembourse : elle se preleve sur la part retenue,
+     * qu'il s'agisse d'une transaction terminee (tout est retenu) ou d'une annulation tardive.
+     */
+    private Plan split(long refund, long retained) {
         long fee = percentOf(retained, platformFeePercent);
         return new Plan(refund, fee, retained - fee);
     }

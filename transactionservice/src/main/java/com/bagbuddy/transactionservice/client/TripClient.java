@@ -1,17 +1,14 @@
 package com.bagbuddy.transactionservice.client;
 
-import com.bagbuddy.transactionservice.web.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.function.Function;
 
 @Component
 public class TripClient {
@@ -42,18 +39,18 @@ public class TripClient {
      */
     public TripSnapshot reserve(Long listingId, java.math.BigDecimal weight, Long transactionId) {
         return circuitBreakerFactory.create(CIRCUIT)
-                .run(() -> doReserve(listingId, weight, transactionId), failFast());
+                .run(() -> doReserve(listingId, weight, transactionId), CircuitFallbacks.failFast(CIRCUIT));
     }
 
     /** Rend a l'annonce le poids pris par une transaction. Sans effet si rien n'est a rendre. */
     public TripSnapshot release(Long listingId, Long transactionId) {
         return circuitBreakerFactory.create(CIRCUIT)
-                .run(() -> doRelease(listingId, transactionId), failFast());
+                .run(() -> doRelease(listingId, transactionId), CircuitFallbacks.failFast(CIRCUIT));
     }
 
     public TripSnapshot fetch(Long listingId) {
         return circuitBreakerFactory.create(CIRCUIT)
-                .run(() -> doFetch(listingId), failFast());
+                .run(() -> doFetch(listingId), CircuitFallbacks.failFast(CIRCUIT));
     }
 
     private TripSnapshot doReserve(Long listingId, java.math.BigDecimal weight, Long transactionId) {
@@ -106,21 +103,4 @@ public class TripClient {
         }
     }
 
-    /**
-     * Le repli ne fabrique jamais de valeur de remplacement : on ne tarife pas une
-     * reservation contre une annonce qu'on n'a pas lue, et un prix par defaut
-     * serait pire qu'une erreur. Les reponses metier (introuvable, refuse,
-     * invalide) remontent intactes ; tout le reste devient une indisponibilite
-     * explicite, que le coupe-circuit ne confonde pas avec une regle du domaine.
-     */
-    private static <T> Function<Throwable, T> failFast() {
-        return throwable -> {
-            if (throwable instanceof NoSuchElementException
-                    || throwable instanceof IllegalArgumentException
-                    || throwable instanceof AccessDeniedException) {
-                throw (RuntimeException) throwable;
-            }
-            throw new ServiceUnavailableException(CIRCUIT, throwable);
-        };
-    }
 }

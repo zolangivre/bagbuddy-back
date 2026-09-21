@@ -116,6 +116,23 @@ public class TransactionService {
     }
 
     /**
+     * Meme controle de participation que getOne, sans charger la transaction : la messagerie n'a
+     * besoin que de savoir qui en est partie et ou elle en est. La regle reste ici, ou elle est
+     * deja, plutot que recopiee chez l'appelant.
+     *
+     * @return la paire de statuts courante
+     */
+    @Transactional(readOnly = true)
+    public StatusPair requireParticipantIn(Long id, String callerSub) {
+        TransactionRepository.Participants parties = transactionRepository.findParticipants(id)
+                .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
+        if (!callerSub.equals(parties.getBuyerId()) && !callerSub.equals(parties.getSellerId())) {
+            throw new AccessDeniedException("Caller is not a party to transaction " + id);
+        }
+        return new StatusPair(parties.getSellerStatus(), parties.getBuyerStatus());
+    }
+
+    /**
      * The booking is priced against the listing as tripservice owns it, so a client cannot
      * decide what it is going to pay by sending its own total, listingInfo or sellerId.
      */
@@ -326,12 +343,22 @@ public class TransactionService {
             case RELEASE_CAPACITY, NONE -> { }
         }
 
-        existing.setSellerStatus(to.sellerStatus());
-        existing.setBuyerStatus(to.buyerStatus());
-        planSettlement(existing, actor);
-        // Dans la transaction de writeTx : l'email ne part qu'une fois l'ecriture validee.
-        events.publishEvent(TransactionStatusChanged.of(existing, actor));
-        return transactionRepository.save(existing);
+        return reach(existing, to, actor);
+    }
+
+    /**
+     * Le passage a une nouvelle paire de statuts, par ou passe toute transition appliquee : les
+     * deux colonnes voyagent ensemble, le reglement se planifie, et l'evenement est publie dans la
+     * transaction d'ecriture -- l'email ne part donc qu'une fois celle-ci validee. Tout ce qui
+     * s'ajoutera a une transition (une trace, une metrique) se met ici, et vaut pour les deux
+     * chemins vers completed : la cloture par l'acheteur et le code de remise saisi par le voyageur.
+     */
+    private Transaction reach(Transaction tx, StatusPair to, Actor actor) {
+        tx.setSellerStatus(to.sellerStatus());
+        tx.setBuyerStatus(to.buyerStatus());
+        planSettlement(tx, actor);
+        events.publishEvent(TransactionStatusChanged.of(tx, actor));
+        return transactionRepository.save(tx);
     }
 
     /**
@@ -466,7 +493,7 @@ public class TransactionService {
                 throw new IllegalArgumentException(
                         "Payment has not been confirmed by Stripe for transaction " + existing.getId());
             }
-            if (!Long.valueOf(minorUnits(existing.getTotal())).equals(existing.getStripeAmount())) {
+            if (!Long.valueOf(Money.minorUnits(existing.getTotal())).equals(existing.getStripeAmount())) {
                 throw new IllegalArgumentException(
                         "The recorded payment does not cover the total of transaction " + existing.getId());
             }
@@ -496,7 +523,7 @@ public class TransactionService {
         if (!stateMachine.awaitingPaymentPair().equals(StatusPair.of(tx))) {
             throw new IllegalArgumentException("Transaction " + id + " is not awaiting payment");
         }
-        if (amount == null || amount != minorUnits(tx.getTotal())) {
+        if (amount == null || amount != Money.minorUnits(tx.getTotal())) {
             throw new IllegalArgumentException(
                     "Paid amount " + amount + " does not match the total of transaction " + id);
         }
@@ -540,12 +567,7 @@ public class TransactionService {
                 current.setHandoverAttempts(current.getHandoverAttempts() + 1);
                 return transactionRepository.save(current);
             }
-            StatusPair done = stateMachine.completedPair();
-            current.setSellerStatus(done.sellerStatus());
-            current.setBuyerStatus(done.buyerStatus());
-            planSettlement(current, Actor.SELLER);
-            events.publishEvent(TransactionStatusChanged.of(current, Actor.SELLER));
-            return transactionRepository.save(current);
+            return reach(current, stateMachine.completedPair(), Actor.SELLER);
         });
         if (stateMachine.isCompleted(StatusPair.of(tx))) {
             return tx;
@@ -585,14 +607,6 @@ public class TransactionService {
     private Transaction findOrThrow(Long id) {
         return transactionRepository.findById(id)
                 .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
-    }
-
-    /** Same conversion stripeservice uses to build the PaymentIntent amount. */
-    private static long minorUnits(BigDecimal total) {
-        if (total == null) {
-            throw new IllegalArgumentException("Transaction has no total");
-        }
-        return total.setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact();
     }
 
     private void requireParticipant(Transaction tx, String callerSub) {

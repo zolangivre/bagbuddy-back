@@ -117,7 +117,6 @@ public class StripeSdkGateway implements StripeGateway {
             Account account = Account.retrieve(accountId);
             Account.Capabilities capabilities = account.getCapabilities();
             return Optional.of(new ConnectedAccount(
-                    account.getId(),
                     Boolean.TRUE.equals(account.getDetailsSubmitted()),
                     Boolean.TRUE.equals(account.getPayoutsEnabled()),
                     capabilities != null && "active".equals(capabilities.getTransfers())));

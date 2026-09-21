@@ -96,6 +96,8 @@ public class PayoutService {
         if (sellerSub == null || sellerSub.isBlank()) {
             throw new IllegalArgumentException("sellerSub is required");
         }
+        // La garde d'idempotence passe avant tout le reste : qu'un versement ait deja ete emis
+        // pour cette transaction ne doit dependre de la reponse d'aucun autre service.
         String group = transferGroup(transactionId);
         Optional<String> existing = stripe.findTransfer(group);
         if (existing.isPresent()) {

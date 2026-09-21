@@ -1,7 +1,6 @@
 package com.bagbuddy.tripservice.service;
 
 import com.bagbuddy.tripservice.dto.TripAlertInput;
-import com.bagbuddy.tripservice.model.Trip;
 import com.bagbuddy.tripservice.model.TripAlert;
 import com.bagbuddy.tripservice.repository.TripAlertRepository;
 import com.bagbuddy.tripservice.web.BusinessException;
@@ -84,30 +83,24 @@ public class TripAlertService {
 
     /** Les alertes d'autres membres que l'auteur de l'annonce, qui correspondent a celle-ci. */
     @Transactional(readOnly = true)
-    public List<TripAlert> matching(Trip trip) {
-        return repository.findByDepartureAirportAndArrivalAirport(trip.getDepartureAirport(), trip.getArrivalAirport())
+    public List<TripAlert> matching(TripPublished trip) {
+        return repository.findCandidates(trip.departureAirport(), trip.arrivalAirport(), trip.authorSub(),
+                        trip.pricePerKg(), trip.remainingWeight())
                 .stream()
-                .filter(alert -> !alert.getSub().equals(trip.getUserId()))
-                .filter(alert -> matches(alert, trip))
+                .filter(alert -> withinWindow(alert, trip))
                 .toList();
     }
 
-    static boolean matches(TripAlert alert, Trip trip) {
-        if (alert.getDepartureDay() != null) {
-            if (trip.getDepartureDate() == null) {
-                return false;
-            }
-            long gap = Math.abs(ChronoUnit.DAYS.between(alert.getDepartureDay(), trip.getDepartureDate().toLocalDate()));
-            if (gap > alert.getFlexDays()) {
-                return false;
-            }
+    /** La fenetre de jours calendaires, seul critere que la base ne filtre pas : chaque alerte a son propre flexDays. */
+    static boolean withinWindow(TripAlert alert, TripPublished trip) {
+        if (alert.getDepartureDay() == null) {
+            return true;
         }
-        if (alert.getMaxPricePerKg() != null
-                && (trip.getPricePerKg() == null || trip.getPricePerKg().compareTo(alert.getMaxPricePerKg()) > 0)) {
+        if (trip.departureDate() == null) {
             return false;
         }
-        return alert.getMinWeight() == null
-                || (trip.getRemainingWeight() != null && trip.getRemainingWeight().compareTo(alert.getMinWeight()) >= 0);
+        long gap = Math.abs(ChronoUnit.DAYS.between(alert.getDepartureDay(), trip.departureDate().toLocalDate()));
+        return gap <= alert.getFlexDays();
     }
 
     private static LocalDate parseDay(String value) {

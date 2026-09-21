@@ -1,6 +1,5 @@
 package com.bagbuddy.transactionservice.service;
 
-import com.bagbuddy.transactionservice.model.Transaction;
 import com.bagbuddy.transactionservice.model.TransactionMessage;
 import com.bagbuddy.transactionservice.repository.TransactionMessageRepository;
 import com.bagbuddy.transactionservice.web.BusinessException;
@@ -40,19 +39,19 @@ public class TransactionMessageService {
 
     @Transactional(readOnly = true)
     public List<TransactionMessage> list(Long transactionId, Long afterId, String callerSub) {
-        transactions.getOne(transactionId, callerSub);
+        transactions.requireParticipantIn(transactionId, callerSub);
         return repository.findByTransactionIdAndIdGreaterThanOrderByIdAsc(transactionId,
                 afterId == null ? 0L : afterId, PageRequest.of(0, PAGE));
     }
 
     @Transactional
     public TransactionMessage send(Long transactionId, String body, String callerSub) {
-        Transaction tx = transactions.getOne(transactionId, callerSub);
+        TransactionStateMachine.StatusPair pair = transactions.requireParticipantIn(transactionId, callerSub);
         String text = body == null ? "" : body.strip();
         if (text.isEmpty() || text.length() > MAX_LENGTH) {
             throw new BusinessException("invalid_message", "A message has 1 to " + MAX_LENGTH + " characters.");
         }
-        if (!stateMachine.acceptsMessages(TransactionStateMachine.StatusPair.of(tx))) {
+        if (!stateMachine.acceptsMessages(pair)) {
             throw new BusinessException("conversation_closed", "This transaction was cancelled.");
         }
         if (repository.countByTransactionIdAndSenderSubAndCreatedAtAfter(transactionId, callerSub,

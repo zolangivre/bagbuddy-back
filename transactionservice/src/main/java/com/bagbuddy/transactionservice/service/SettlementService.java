@@ -18,7 +18,6 @@ import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.List;
@@ -146,27 +145,19 @@ public class SettlementService {
 
     private void executeRefund(Transaction tx) {
         Long id = tx.getId();
-        try {
+        attempt("refund", id, tx.getRefundAmount(), t -> t.setRefundStatus(SettlementStatus.FAILED), () -> {
             String refundId = stripe.refund(id, tx.getStripePaymentIntentId(), tx.getRefundAmount());
             record(id, t -> {
                 t.setRefundStatus(SettlementStatus.DONE);
                 t.setStripeRefundId(refundId);
                 t.setRefundedAt(LocalDateTime.now());
             });
-        } catch (IllegalArgumentException refused) {
-            record(id, t -> t.setRefundStatus(SettlementStatus.FAILED));
-            failure("refund", "refused");
-            log.error("Refund of {} for transaction {} was refused by Stripe and needs a human: {}",
-                    tx.getRefundAmount(), id, refused.getMessage());
-        } catch (RuntimeException unavailable) {
-            failure("refund", "unavailable");
-            log.warn("Refund for transaction {} could not be issued yet; it will be retried", id, unavailable);
-        }
+        });
     }
 
     private void executePayout(Transaction tx) {
         Long id = tx.getId();
-        try {
+        attempt("payout", id, tx.getPayoutAmount(), t -> t.setPayoutStatus(SettlementStatus.FAILED), () -> {
             TransferResult result = stripe.transfer(id, tx.getStripePaymentIntentId(), tx.getSellerId(), tx.getPayoutAmount());
             if (result.status() == StripeClient.TransferStatus.PAID) {
                 record(id, t -> {
@@ -179,14 +170,30 @@ public class SettlementService {
                 // plateforme, et la relance le versera des que l'onboarding sera fait.
                 record(id, t -> t.setPayoutStatus(SettlementStatus.AWAITING_ACCOUNT));
             }
+        });
+    }
+
+    /**
+     * Ce qu'on fait d'un mouvement d'argent qui echoue, pour les deux sortes a la fois : un refus
+     * definitif (400) est enregistre FAILED et laisse a un humain, une indisponibilite laisse la
+     * ligne en attente et SettlementJob la reprendra. Un echec ne defait jamais la transition qui
+     * l'a declenche.
+     *
+     * @param kind       "refund" ou "payout" : l'etiquette de la metrique
+     * @param markFailed comment marquer ce mouvement-ci comme definitivement refuse
+     */
+    private void attempt(String kind, Long id, Long amount, Consumer<Transaction> markFailed, Runnable move) {
+        try {
+            move.run();
         } catch (IllegalArgumentException refused) {
-            record(id, t -> t.setPayoutStatus(SettlementStatus.FAILED));
-            failure("payout", "refused");
-            log.error("Payout of {} for transaction {} was refused by Stripe and needs a human: {}",
-                    tx.getPayoutAmount(), id, refused.getMessage());
+            record(id, markFailed);
+            failure(kind, "refused");
+            log.error("Settlement {} of {} for transaction {} was refused by Stripe and needs a human: {}",
+                    kind, amount, id, refused.getMessage());
         } catch (RuntimeException unavailable) {
-            failure("payout", "unavailable");
-            log.warn("Payout for transaction {} could not be made yet; it will be retried", id, unavailable);
+            failure(kind, "unavailable");
+            log.warn("Settlement {} for transaction {} could not be executed yet; it will be retried",
+                    kind, id, unavailable);
         }
     }
 
@@ -215,7 +222,7 @@ public class SettlementService {
         if (tx.getStripeAmount() != null) {
             return tx.getStripeAmount();
         }
-        return tx.getTotal().setScale(2, RoundingMode.HALF_UP).movePointRight(2).longValueExact();
+        return Money.minorUnits(tx.getTotal());
     }
 
     private static LocalDateTime departureOf(Transaction tx) {

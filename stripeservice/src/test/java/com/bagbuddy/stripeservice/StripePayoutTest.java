@@ -124,7 +124,7 @@ class StripePayoutTest {
 
         // Compte cree mais onboarding inacheve : toujours pas.
         when(userClient.payoutAccount(SELLER)).thenReturn("acct_seller");
-        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount("acct_seller", true, false, false)));
+        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount(true, false, false)));
 
         mockMvc.perform(internal("transfers", transfer(2250)).with(service()))
                 .andExpect(status().isOk())
@@ -137,7 +137,7 @@ class StripePayoutTest {
     void aReadySellerIsPaidFromTheOriginalCharge() throws Exception {
         when(stripe.findTransfer("transaction-42")).thenReturn(Optional.empty());
         when(userClient.payoutAccount(SELLER)).thenReturn("acct_seller");
-        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount("acct_seller", true, true, true)));
+        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount(true, true, true)));
         when(stripe.latestChargeOf("pi_1")).thenReturn("ch_1");
         when(stripe.transfer("acct_seller", 2250, "eur", "ch_1", "transaction-42", "42")).thenReturn("tr_1");
 
@@ -195,7 +195,7 @@ class StripePayoutTest {
 
         // Compte deja cree : on reprend le meme.
         when(userClient.payoutAccount(SELLER)).thenReturn("acct_seller");
-        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount("acct_seller", false, false, false)));
+        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount(false, false, false)));
         mockMvc.perform(graphql("mutation { startPayoutOnboarding { url } }").with(seller))
                 .andExpect(status().isOk());
         verify(stripe, never()).createExpressAccount(anyString(), anyString(), anyString());
@@ -212,7 +212,7 @@ class StripePayoutTest {
     @Test
     void theCallerReadsOnlyTheirOwnAccountStatus() throws Exception {
         when(userClient.payoutAccount(SELLER)).thenReturn("acct_seller");
-        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount("acct_seller", true, true, true)));
+        when(stripe.account("acct_seller")).thenReturn(Optional.of(new ConnectedAccount(true, true, true)));
 
         mockMvc.perform(graphql("{ payoutAccount { connected detailsSubmitted payoutsEnabled transfersActive } }")
                         .with(jwt().jwt(j -> j.subject(SELLER))))

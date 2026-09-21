@@ -194,7 +194,7 @@ public class TripService {
         // 'active' n'est pas calcule ici : TripListener le recalcule en @PrePersist et
         // ecraserait la valeur. Une seule formule, un seul endroit.
         Trip saved = tripRepository.save(trip);
-        events.publishEvent(new TripPublished(saved.getId()));
+        events.publishEvent(TripPublished.of(saved));
         return saved;
     }
 

@@ -40,6 +40,6 @@ public interface StripeGateway {
     /** Lien d'onboarding a usage unique, a ouvrir dans le navigateur du membre. */
     String onboardingLink(String accountId, String refreshUrl, String returnUrl);
 
-    record ConnectedAccount(String id, boolean detailsSubmitted, boolean payoutsEnabled, boolean transfersActive) {
+    record ConnectedAccount(boolean detailsSubmitted, boolean payoutsEnabled, boolean transfersActive) {
     }
 }

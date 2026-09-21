@@ -106,6 +106,9 @@ bagbuddy.stripe.currency: ${STRIPE_CURRENCY:eur}
 bagbuddy.user-service.url: ${USER_SERVICE_URL:http://localhost:8086}
 # Stripe Connect Express : pays des comptes crees, et retour sur le front apres l'onboarding.
 bagbuddy.stripe.connect.country: ${STRIPE_CONNECT_COUNTRY:FR}
+# Routes du front : changer celles-ci suppose de changer le front en face.
+bagbuddy.stripe.connect.return-path: ${STRIPE_CONNECT_RETURN_PATH:/account?payouts=done}
+bagbuddy.stripe.connect.refresh-path: ${STRIPE_CONNECT_REFRESH_PATH:/account?payouts=retry}
 bagbuddy.front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
 
 # --- Appels sortants ---

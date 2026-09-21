@@ -56,4 +56,26 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     @Query("select coalesce(sum(t.total), 0) from Transaction t where t.buyerId = :userId "
             + "and lower(t.sellerStatus) = 'completed' and lower(t.buyerStatus) = 'completed'")
     BigDecimal sumCompletedByBuyer(@Param("userId") String userId);
+
+    /**
+     * Les quatre colonnes qui suffisent a savoir qui participe et ou en est la transaction. Le fil
+     * de messages est relu a intervalle par le front : hydrater la ligne entiere, ses deux UserInfo
+     * et son ListingInfo embarques, pour ne lire que buyerId et sellerId, etait le plus gros
+     * gaspillage du chemin le plus frequent.
+     */
+    @Query("select t.buyerId as buyerId, t.sellerId as sellerId, "
+            + "t.sellerStatus as sellerStatus, t.buyerStatus as buyerStatus "
+            + "from Transaction t where t.id = :id")
+    Optional<Participants> findParticipants(@Param("id") Long id);
+
+    /** Projection de findParticipants. */
+    interface Participants {
+        String getBuyerId();
+
+        String getSellerId();
+
+        String getSellerStatus();
+
+        String getBuyerStatus();
+    }
 }

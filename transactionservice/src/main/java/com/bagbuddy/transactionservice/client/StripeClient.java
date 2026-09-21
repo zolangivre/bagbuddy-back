@@ -1,17 +1,13 @@
 package com.bagbuddy.transactionservice.client;
 
-import com.bagbuddy.transactionservice.web.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.function.Function;
 
 /**
  * Demande a stripeservice d'executer les mouvements d'argent que transactionservice a decides.
@@ -55,7 +51,7 @@ public class StripeClient {
                 throw new IllegalStateException("stripeservice returned no refund for transaction " + transactionId);
             }
             return result.refundId();
-        }, failFast());
+        }, CircuitFallbacks.failFast(CIRCUIT));
     }
 
     public TransferResult transfer(Long transactionId, String paymentIntentId, String sellerSub, long amount) {
@@ -69,7 +65,7 @@ public class StripeClient {
                 throw new IllegalStateException("stripeservice returned no transfer status for transaction " + transactionId);
             }
             return result;
-        }, failFast());
+        }, CircuitFallbacks.failFast(CIRCUIT));
     }
 
     private <T> T post(String path, Map<String, Object> body, Class<T> type) {
@@ -88,16 +84,5 @@ public class StripeClient {
             }
             throw ex;
         }
-    }
-
-    private static <T> Function<Throwable, T> failFast() {
-        return throwable -> {
-            if (throwable instanceof NoSuchElementException
-                    || throwable instanceof IllegalArgumentException
-                    || throwable instanceof AccessDeniedException) {
-                throw (RuntimeException) throwable;
-            }
-            throw new ServiceUnavailableException(CIRCUIT, throwable);
-        };
     }
 }
