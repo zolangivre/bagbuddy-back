@@ -7,7 +7,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
- * Ne couvre plus que le webhook Stripe, seul endpoint REST restant du service : un
+ * Couvre le webhook Stripe et les endpoints internes /stripe/internal, seuls endpoints REST du service : un
  * @RestControllerAdvice ne s'applique qu'aux controleurs HTTP, jamais aux resolvers GraphQL,
  * dont les erreurs passent par GraphQlExceptionResolver.
  *
@@ -20,6 +20,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(AccessDeniedException.class)
     public ProblemDetail handleAccessDenied(AccessDeniedException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, "Access denied");
+    }
+
+    /** Stripe ou userservice injoignable : l'appelant (transactionservice) reessaiera. */
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public ProblemDetail handleUnavailable(ServiceUnavailableException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
-import java.util.Optional;
+import java.util.List;
 
 /**
  * Tells the other party that a transaction moved, by email.
@@ -37,7 +37,9 @@ public class TransactionNotifier {
 
     /** What happened, from the recipient's point of view. */
     public enum Kind {
-        NEW_REQUEST, REQUEST_ACCEPTED, REQUEST_DECLINED, PAYMENT_CONFIRMED, COMPLETED, CANCELLED
+        NEW_REQUEST, REQUEST_ACCEPTED, REQUEST_DECLINED, PAYMENT_CONFIRMED, COMPLETED, CANCELLED,
+        /** Annulee par le planificateur, vol parti sans paiement : personne n'a fait ce geste. */
+        EXPIRED
     }
 
     public record Notice(Kind kind, Party recipient, Party counterpart) { }
@@ -59,7 +61,7 @@ public class TransactionNotifier {
         if (!enabled) {
             return;
         }
-        noticeFor(event).ifPresent(notice -> {
+        noticesFor(event).forEach(notice -> {
             if (notice.recipient().email() == null || notice.recipient().email().isBlank()) {
                 log.warn("No email on file for the recipient of {} on transaction {}",
                         notice.kind(), event.transactionId());
@@ -76,42 +78,47 @@ public class TransactionNotifier {
     }
 
     /**
-     * Which email, to whom. Keyed on the pair reached rather than on the edge taken: a new
+     * Which emails, to whom. Keyed on the pair reached rather than on the edge taken: a new
      * request after a refusal lands on the same pair as a first request, and says the same thing.
      */
-    Optional<Notice> noticeFor(TransactionStatusChanged event) {
+    List<Notice> noticesFor(TransactionStatusChanged event) {
         String seller = event.sellerStatus();
         String buyer = event.buyerStatus();
         Party toSeller = event.seller();
         Party toBuyer = event.buyer();
+        Actor actor = event.actor();
 
         if (is(seller, status.getReservationReceived()) && is(buyer, status.getWaitingForResponseBuyer())) {
-            return notice(Kind.NEW_REQUEST, toSeller, toBuyer, event.actor(), Actor.SELLER);
+            return notice(Kind.NEW_REQUEST, toSeller, toBuyer, actor, Actor.SELLER);
         }
         if (is(seller, status.getAwaitingPayment()) && is(buyer, status.getPaymentRequired())) {
-            return notice(Kind.REQUEST_ACCEPTED, toBuyer, toSeller, event.actor(), Actor.BUYER);
+            return notice(Kind.REQUEST_ACCEPTED, toBuyer, toSeller, actor, Actor.BUYER);
         }
         if (is(seller, status.getWaitingForResponseSeller()) && is(buyer, status.getRequestRejected())) {
-            return notice(Kind.REQUEST_DECLINED, toBuyer, toSeller, event.actor(), Actor.BUYER);
+            return notice(Kind.REQUEST_DECLINED, toBuyer, toSeller, actor, Actor.BUYER);
         }
         if (is(seller, status.getConfirmed()) && is(buyer, status.getConfirmed())) {
-            return notice(Kind.PAYMENT_CONFIRMED, toSeller, toBuyer, event.actor(), Actor.SELLER);
+            return notice(Kind.PAYMENT_CONFIRMED, toSeller, toBuyer, actor, Actor.SELLER);
         }
         boolean completed = is(seller, status.getCompleted()) && is(buyer, status.getCompleted());
         boolean cancelled = is(seller, status.getCancelled()) && is(buyer, status.getCancelled());
+        if (cancelled && actor == Actor.SYSTEM) {
+            // Expiration par le planificateur : personne n'a fait ce geste, les deux l'apprennent.
+            return List.of(new Notice(Kind.EXPIRED, toBuyer, toSeller), new Notice(Kind.EXPIRED, toSeller, toBuyer));
+        }
         if (completed || cancelled) {
             Kind kind = completed ? Kind.COMPLETED : Kind.CANCELLED;
             // Terminee ou annulee : l'un ou l'autre peut en etre a l'origine, on previent l'autre.
-            return event.actor() == Actor.BUYER
-                    ? Optional.of(new Notice(kind, toSeller, toBuyer))
-                    : Optional.of(new Notice(kind, toBuyer, toSeller));
+            return actor == Actor.BUYER
+                    ? List.of(new Notice(kind, toSeller, toBuyer))
+                    : List.of(new Notice(kind, toBuyer, toSeller));
         }
-        return Optional.empty();
+        return List.of();
     }
 
-    private static Optional<Notice> notice(Kind kind, Party recipient, Party counterpart,
-                                           Actor actor, Actor recipientSide) {
-        return actor == recipientSide ? Optional.empty() : Optional.of(new Notice(kind, recipient, counterpart));
+    private static List<Notice> notice(Kind kind, Party recipient, Party counterpart,
+                                       Actor actor, Actor recipientSide) {
+        return actor == recipientSide ? List.of() : List.of(new Notice(kind, recipient, counterpart));
     }
 
     private static boolean is(String value, String expected) {

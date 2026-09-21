@@ -1,5 +1,6 @@
 package com.bagbuddy.transactionservice.repository;
 
+import com.bagbuddy.transactionservice.model.SettlementStatus;
 import com.bagbuddy.transactionservice.model.Transaction;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -19,6 +20,12 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     List<Transaction> findByBuyerIdOrSellerIdOrderByCreatedAtDesc(String buyerId, String sellerId);
 
     Long countByBuyerIdOrSellerId(String buyerId, String sellerId);
+
+    /** Reglements a relancer. Couverte par idx_transaction_settlement_pending. */
+    @Query("select t.id from Transaction t where t.refundStatus = :pending "
+            + "or t.payoutStatus = :pending or t.payoutStatus = :awaitingAccount")
+    List<Long> findWithPendingSettlement(@Param("pending") SettlementStatus pending,
+                                         @Param("awaitingAccount") SettlementStatus awaitingAccount);
 
     /**
      * Candidates a l'expiration. departureDate est l'instantane texte de l'annonce, au format de

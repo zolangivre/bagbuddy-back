@@ -97,6 +97,19 @@ bagbuddy:
     validity: ${EMAIL_VERIFICATION_VALIDITY:24h}
     min-interval: ${EMAIL_VERIFICATION_MIN_INTERVAL:60s}
 
+  # --- Favoris et signalements ---
+  favorites:
+    max: ${FAVORITES_MAX:200}
+  reports:
+    max-per-day: ${REPORTS_MAX_PER_DAY:10}
+  moderation:
+    # Boite de la moderation : chaque signalement y est envoye.
+    email: ${MODERATION_EMAIL:moderation@bagbuddy.local}
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
+
 # En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
 spring.mail:
   host: ${SMTP_HOST:localhost}

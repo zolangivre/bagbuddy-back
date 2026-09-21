@@ -190,6 +190,24 @@ montre les événements relayés.
 Le passage « à payer » → « confirmée » est accepté sans Stripe. Pratique pour
 travailler sur le front sans clés.
 
+**Remboursements et versements.** Quand une transaction payée se termine ou
+s'annule, l'argent est réparti automatiquement :
+
+| Situation | Remboursé à l'acheteur | Commission | Versé au voyageur |
+| --- | --- | --- | --- |
+| terminée | 0 | 10 % | le reste |
+| annulée par le voyageur | 100 % | 0 | 0 |
+| annulée par l'acheteur plus de 24 h avant le départ | 100 % | 0 | 0 |
+| annulée par l'acheteur moins de 24 h avant | 50 % | 10 % de la part gardée | le reste |
+
+Ces règles se règlent par `PLATFORM_FEE_PERCENT`, `LATE_CANCELLATION_WINDOW` et
+`LATE_CANCELLATION_REFUND_PERCENT` (sur `transaction-service`). Pour être payé, un
+voyageur configure ses versements depuis son compte (onboarding Stripe Connect
+Express) ; d'ici là, sa part attend sur la plateforme et part automatiquement une
+fois son compte prêt. Il faut pour cela **activer Connect** dans le dashboard
+Stripe (mode test : [dashboard.stripe.com/test/connect](https://dashboard.stripe.com/test/connect/accounts/overview)).
+En paiement simulé, la répartition est calculée et affichée, sans aucun appel à Stripe.
+
 Après un changement du `.env` :
 `docker compose -f docker-compose.dev.yml up -d` (recrée les conteneurs concernés).
 

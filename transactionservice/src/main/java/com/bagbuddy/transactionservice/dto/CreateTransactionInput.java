@@ -9,7 +9,8 @@ import java.math.BigDecimal;
  * Entree de createTransaction. Ni total, ni sellerId, ni listingInfo : tout cela est resolu
  * contre l'annonce reelle detenue par tripservice. Le schema rend la regle verifiable.
  */
-public record CreateTransactionInput(Long listingId, BigDecimal weight, ProfileInput profile) {
+public record CreateTransactionInput(Long listingId, BigDecimal weight, ProfileInput profile,
+                                     String contentDescription, boolean prohibitedItemsAccepted) {
 
     public record ProfileInput(String bio, String location, String phone) {
     }
@@ -18,6 +19,8 @@ public record CreateTransactionInput(Long listingId, BigDecimal weight, ProfileI
         Transaction tx = new Transaction();
         tx.setListingId(listingId);
         tx.setWeight(weight);
+        tx.setContentDescription(contentDescription);
+        tx.setProhibitedItemsAccepted(prohibitedItemsAccepted);
         if (profile != null) {
             UserInfo info = new UserInfo();
             info.setBio(profile.bio());

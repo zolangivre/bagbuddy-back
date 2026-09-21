@@ -19,6 +19,9 @@ type Query {
     "Somme des transactions terminees des deux cotes."
     totalEarned(sellerId: String!): Float!
     totalSpent(buyerId: String!): Float!
+
+    "Fil d'une transaction, du plus ancien au plus recent. afterId : ne rendre que la suite. 200 messages au plus."
+    transactionMessages(transactionId: ID!, afterId: ID): [TransactionMessage!]!
 }
 
 type Mutation {
@@ -35,6 +38,24 @@ type Mutation {
     updateTransaction(id: ID!, input: UpdateTransactionInput!): Transaction!
 
     deleteTransaction(id: ID!): Boolean!
+
+    """
+    Le voyageur clot la transaction payee avec le code que le destinataire lui donne a la
+    livraison. Codes : invalid_handover_code, handover_locked (5 essais), handover_not_expected.
+    """
+    confirmHandover(id: ID!, code: String!): Transaction!
+
+    "Participants seulement. Codes : invalid_message (1 a 2000 caracteres), conversation_closed, too_many_messages."
+    sendTransactionMessage(transactionId: ID!, body: String!): TransactionMessage!
+}
+
+type TransactionMessage {
+    id: ID!
+    senderSub: String!
+    body: String!
+    createdAt: DateTime!
+    "Vrai si l'appelant en est l'auteur."
+    mine: Boolean!
 }
 
 type Transaction {
@@ -61,6 +82,29 @@ type Transaction {
     stripeAmount: Long
     paidAt: DateTime
     createdAt: DateTime
+
+    "Ce que l'acheteur confie au voyageur, declare a la reservation."
+    contentDescription: String
+    prohibitedItemsAccepted: Boolean!
+
+    "Code de remise. Rendu a l'acheteur seul, a partir du paiement ; nul pour le voyageur."
+    handoverCode: String
+    "Trop de codes faux : seul l'acheteur peut encore clore."
+    handoverLocked: Boolean!
+
+    """
+    Reglement, en unites mineures comme stripeAmount, renseigne quand une transaction payee se
+    termine ou s'annule : refundAmount + platformFee + payoutAmount = stripeAmount.
+    """
+    platformFee: Long
+    refundAmount: Long
+    "PENDING, DONE, SIMULATED (paiement simule en dev) ou FAILED (a traiter a la main). Nul si rien a rembourser."
+    refundStatus: String
+    refundedAt: DateTime
+    payoutAmount: Long
+    "PENDING, AWAITING_ACCOUNT (le voyageur doit configurer ses versements), DONE, SIMULATED ou FAILED."
+    payoutStatus: String
+    paidOutAt: DateTime
 }
 
 "Instantane d'une partie. Visible seulement des participants de la transaction."
@@ -97,6 +141,12 @@ input CreateTransactionInput {
 
     "Champs libres du profil acheteur. L'identite vient du jeton."
     profile: ProfileInput
+
+    "Ce qui sera transporte, 500 caracteres au plus. Code content_description_required."
+    contentDescription: String!
+
+    "Doit valoir true : l'acheteur accepte la liste des objets interdits. Code prohibited_items_not_accepted."
+    prohibitedItemsAccepted: Boolean!
 }
 
 input ProfileInput {

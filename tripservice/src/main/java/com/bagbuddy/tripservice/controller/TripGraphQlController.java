@@ -66,6 +66,11 @@ public class TripGraphQlController {
     }
 
     @QueryMapping
+    public List<TripResponse> tripsByIds(@Argument List<Long> ids, @AuthenticationPrincipal Jwt jwt) {
+        return TripResponse.of(tripService.getTripsByIds(ids), CallerIdentity.subOf(jwt));
+    }
+
+    @QueryMapping
     public List<TripResponse> tripsByUser(@Argument String userId, @Argument Integer limit,
                                           @Argument Integer offset, @AuthenticationPrincipal Jwt jwt) {
         return TripResponse.of(tripService.getTripsByUserId(userId, limit, offset), CallerIdentity.subOf(jwt));

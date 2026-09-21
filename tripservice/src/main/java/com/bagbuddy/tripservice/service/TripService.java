@@ -10,6 +10,7 @@ import com.bagbuddy.tripservice.repository.TripSearchRepository;
 import com.bagbuddy.tripservice.security.CallerIdentity;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,7 +21,11 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 // Lectures en readOnly par defaut : Hibernate n'garde pas de snapshot de
@@ -32,13 +37,17 @@ public class TripService {
     private final TripRepository tripRepository;
     private final TripReservationRepository reservationRepository;
     private final TripSearchRepository searchRepository;
+    /** Alertes de trajet : l'evenement part avec la transaction, l'email apres son commit. */
+    private final ApplicationEventPublisher events;
 
     public TripService(TripRepository tripRepository,
                        TripReservationRepository reservationRepository,
-                       TripSearchRepository searchRepository) {
+                       TripSearchRepository searchRepository,
+                       ApplicationEventPublisher events) {
         this.tripRepository = tripRepository;
         this.reservationRepository = reservationRepository;
         this.searchRepository = searchRepository;
+        this.events = events;
     }
 
     /** Tolerance de date maximale : au-dela, un filtre de date ne filtre plus grand-chose. */
@@ -147,6 +156,21 @@ public class TripService {
                 .orElseThrow(() -> new NoSuchElementException("Trip not found with id " + id));
     }
 
+    /**
+     * Annonces demandees par identifiant (favoris d'un membre), dans l'ordre demande. Un id qui
+     * n'existe plus est ignore plutot que refuse : une annonce supprimee disparait simplement de
+     * la liste. Plafonne comme une page, pour qu'une liste d'ids ne ramene jamais la table.
+     */
+    public List<Trip> getTripsByIds(List<Long> ids) {
+        List<Long> distinct = ids.stream().distinct().toList();
+        if (distinct.size() > MAX_PAGE) {
+            throw new IllegalArgumentException("At most " + MAX_PAGE + " ids per call");
+        }
+        Map<Long, Trip> byId = tripRepository.findAllById(distinct).stream()
+                .collect(Collectors.toMap(Trip::getId, Function.identity()));
+        return distinct.stream().map(byId::get).filter(Objects::nonNull).toList();
+    }
+
     public List<Trip> getTripsByUserId(String userId, Integer limit, Integer offset) {
         return tripRepository.findAllByUserIdOrderByCreatedAtDescIdDesc(userId, page(limit, offset));
     }
@@ -169,7 +193,9 @@ public class TripService {
 
         // 'active' n'est pas calcule ici : TripListener le recalcule en @PrePersist et
         // ecraserait la valeur. Une seule formule, un seul endroit.
-        return tripRepository.save(trip);
+        Trip saved = tripRepository.save(trip);
+        events.publishEvent(new TripPublished(saved.getId()));
+        return saved;
     }
 
     @Transactional

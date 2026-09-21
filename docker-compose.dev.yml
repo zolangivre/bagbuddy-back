@@ -30,8 +30,8 @@ services:
       - bagbuddy-network
 
   # --- EMAILS ---
-  # Faux serveur SMTP : userservice (mot de passe oublie, verification) et transactionservice
-  # (notifications) y envoient leurs emails, qui ne partent nulle part et se lisent sur
+  # Faux serveur SMTP : userservice (mot de passe oublie, verification, moderation),
+  # transactionservice (notifications) et tripservice (alertes) y envoient leurs emails, qui ne partent nulle part et se lisent sur
   # http://localhost:8025.
   mailpit:
     image: axllent/mailpit:v1.27
@@ -226,6 +226,10 @@ services:
       - GRAPHIQL_ENABLED=true
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
       - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      # Alertes de trajet : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
     volumes:
       - ./seed/tripservice:/seed:ro
     ports:
@@ -287,6 +291,8 @@ services:
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
       - TRIP_SERVICE_URL=http://trip-service:8082
+      # Remboursements et versements, executes par stripe-service.
+      - STRIPE_SERVICE_URL=http://stripe-service:8085
       # Notifications email des transitions : liens vers le front, remis a Mailpit.
       - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
       - SMTP_HOST=mailpit
@@ -416,6 +422,10 @@ services:
       - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
       - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
       - TRANSACTION_SERVICE_URL=http://transaction-service:8083
+      # Stripe Connect : le compte de versement vit dans le profil userservice, et Stripe
+      # renvoie le membre sur le front a la fin de l'onboarding.
+      - USER_SERVICE_URL=http://user-service:8086
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
     ports:
       - "8085:8085"
     healthcheck:

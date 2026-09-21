@@ -7,7 +7,7 @@
 
 	# Endpoints service-a-service : ils exigent deja le role 'service', mais les services
 	# s'appellent directement sur le reseau Docker et n'ont aucune raison de passer ici.
-	@internal path /trips/internal/* /transactions/internal/*
+	@internal path /trips/internal/* /transactions/internal/* /stripe/internal/* /users/internal/*
 	respond @internal 404
 
 	# L'actuator de la gateway n'a aucune securite devant lui : /actuator/prometheus y detaille

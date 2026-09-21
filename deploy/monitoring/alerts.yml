@@ -23,6 +23,18 @@ groups:
         annotations:
           summary: "Capacite non rendue apres {{ $labels.cause }}"
 
+      # Remboursement ou versement refuse par Stripe (statut FAILED sur la transaction) : a
+      # traiter a la main. Les indisponibilites passageres sont relancees par SettlementJob.
+      - alert: SettlementRefused
+        expr: increase(bagbuddy_settlement_failures_total{cause="refused"}[1h]) > 0
+        annotations:
+          summary: "{{ $labels.kind }} refuse par Stripe : voir les logs de transaction-service"
+
+      - alert: SettlementStuck
+        expr: increase(bagbuddy_settlement_failures_total{cause="unavailable"}[2h]) > 10
+        annotations:
+          summary: "Les {{ $labels.kind }} echouent a repetition : stripe-service ou Stripe indisponible ?"
+
       - alert: CircuitBreakerOpen
         expr: resilience4j_circuitbreaker_state{state="open"} == 1
         for: 1m

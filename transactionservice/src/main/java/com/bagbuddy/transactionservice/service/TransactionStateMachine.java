@@ -1,6 +1,7 @@
 package com.bagbuddy.transactionservice.service;
 
 import com.bagbuddy.transactionservice.config.TransactionStatusProperties;
+import com.bagbuddy.transactionservice.model.Transaction;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 
@@ -20,7 +21,12 @@ import java.util.Optional;
 @Component
 public class TransactionStateMachine {
 
-    public enum Actor { BUYER, SELLER }
+    /**
+     * Qui fait bouger une transaction. SYSTEM n'est autorise sur aucune arete : il ne sert qu'aux
+     * changements decides par le service lui-meme (expiration), pour que les notifications et le
+     * reglement le reconnaissent explicitement plutot que de deviner un acteur absent.
+     */
+    public enum Actor { BUYER, SELLER, SYSTEM }
 
     /** Side effect the service must apply when the edge is taken. */
     public enum Effect { NONE, REPRICE, RESERVE_CAPACITY, SETTLE_PAYMENT, RELEASE_CAPACITY }
@@ -29,6 +35,10 @@ public class TransactionStateMachine {
         public StatusPair {
             Objects.requireNonNull(sellerStatus, "sellerStatus");
             Objects.requireNonNull(buyerStatus, "buyerStatus");
+        }
+
+        public static StatusPair of(Transaction tx) {
+            return new StatusPair(tx.getSellerStatus(), tx.getBuyerStatus());
         }
     }
 
@@ -39,6 +49,7 @@ public class TransactionStateMachine {
     private final StatusPair initial;
     private final StatusPair awaitingPayment;
     private final StatusPair cancelled;
+    private final StatusPair confirmed;
     private final StatusPair completed;
     /** Les paires ou le poids de la transaction est pris sur l'annonce. */
     private final List<StatusPair> holdingCapacity;
@@ -57,6 +68,7 @@ public class TransactionStateMachine {
         this.initial = requested;
         this.awaitingPayment = accepted;
         this.cancelled = cancelled;
+        this.confirmed = confirmed;
         this.completed = completed;
         this.holdingCapacity = List.of(accepted, confirmed, completed);
         // Hors graphe, et hors acteurs : c'est le planificateur qui les annule une fois le vol
@@ -71,8 +83,10 @@ public class TransactionStateMachine {
                 new Transition(requested, rejected, List.of(Actor.SELLER), Effect.NONE),
                 // The buyer pays.
                 new Transition(accepted, confirmed, List.of(Actor.BUYER), Effect.SETTLE_PAYMENT),
-                // Either side may close the deal once it is confirmed, or call it off before that.
-                new Transition(confirmed, completed, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
+                // L'acheteur clot une transaction payee en confirmant la livraison. Le voyageur, lui,
+                // ne la clot que par le code de remise (TransactionService.confirmHandover) : sans
+                // ce code, rien ne prouve qu'il a remis le colis.
+                new Transition(confirmed, completed, List.of(Actor.BUYER), Effect.NONE),
                 new Transition(requested, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
                 new Transition(rejected, cancelled, List.of(Actor.BUYER, Actor.SELLER), Effect.NONE),
                 // Annuler apres l'acceptation rend le poids a l'annonce : il avait ete pris a ce moment-la.
@@ -86,6 +100,19 @@ public class TransactionStateMachine {
 
     public StatusPair cancelledPair() {
         return cancelled;
+    }
+
+    public StatusPair confirmedPair() {
+        return confirmed;
+    }
+
+    public StatusPair completedPair() {
+        return completed;
+    }
+
+    /** Une transaction annulee garde son fil de messages lisible, mais n'en accepte plus. */
+    public boolean acceptsMessages(StatusPair pair) {
+        return !cancelled.equals(pair);
     }
 
     public boolean isExpirable(StatusPair pair) {

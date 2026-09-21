@@ -13,6 +13,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
+import java.util.Map;
 import java.util.NoSuchElementException;
 
 /**
@@ -28,6 +29,13 @@ public class GraphQlExceptionResolver extends DataFetcherExceptionResolverAdapte
 
     @Override
     protected GraphQLError resolveToSingleError(Throwable ex, DataFetchingEnvironment env) {
+        if (ex instanceof BusinessException business) {
+            return GraphqlErrorBuilder.newError(env)
+                    .errorType(ErrorType.BAD_REQUEST)
+                    .message(business.getMessage())
+                    .extensions(Map.of("code", business.getCode()))
+                    .build();
+        }
         if (ex instanceof AccessDeniedException) {
             // Un appelant non authentifie qui bute sur une regle d'acces doit lire UNAUTHORIZED
             // et non FORBIDDEN : il lui manque un jeton, pas un droit.

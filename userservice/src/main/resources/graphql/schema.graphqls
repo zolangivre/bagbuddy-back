@@ -11,6 +11,9 @@ type Query {
 
     "Profil public d'un autre membre : ni email, ni telephone, ni compte de paiement."
     user(sub: String!): PublicUserProfile!
+
+    "Annonces mises de cote par l'appelant, les plus recentes d'abord. Lues ensuite dans tripservice (tripsByIds)."
+    favoriteListingIds: [ID!]!
 }
 
 type Mutation {
@@ -59,6 +62,37 @@ type Mutation {
     que le compte n'a plus : code invalid_verification_token.
     """
     verifyEmail(token: String!): Boolean!
+
+    "Idempotent. 200 favoris au plus : code too_many_favorites au-dela."
+    addFavoriteListing(listingId: ID!): Boolean!
+
+    "Idempotent : retirer une annonce absente n'est pas une erreur."
+    removeFavoriteListing(listingId: ID!): Boolean!
+
+    """
+    Signale un membre a la moderation (email). L'auteur est toujours l'appelant. Codes :
+    cannot_report_self, too_many_reports (10 par 24 h).
+    """
+    reportMember(input: ReportMemberInput!): Boolean!
+}
+
+enum ReportReason {
+    "Objets interdits ou contenu non declare."
+    PROHIBITED_ITEMS
+    "Absent au rendez-vous de remise."
+    NO_SHOW
+    FRAUD
+    HARASSMENT
+    OTHER
+}
+
+input ReportMemberInput {
+    reportedSub: String!
+    "La transaction concernee, quand le signalement vient d'une transaction."
+    transactionId: ID
+    reason: ReportReason!
+    "2000 caracteres au plus."
+    details: String
 }
 
 "Profil complet. N'est jamais renvoye qu'a son proprietaire."
@@ -73,6 +107,7 @@ type UserProfile {
     bio: String
     location: String
     phone: String
+    "Compte Stripe Connect du membre, enregistre par stripeservice. Lecture seule."
     stripeAccountId: String
 }
 
@@ -97,11 +132,14 @@ input RegisterInput {
     password: String!
 }
 
+"""
+Le compte de versement n'y figure pas : il est cree et enregistre par stripeservice pendant
+l'onboarding Stripe Connect (startPayoutOnboarding), jamais saisi par le membre.
+"""
 input UpdateProfileInput {
     bio: String
     location: String
     phone: String
-    stripeAccountId: String
 }
 
 input UpdateIdentityInput {

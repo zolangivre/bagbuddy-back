@@ -126,3 +126,15 @@ BEGIN
 
     PERFORM setval(pg_get_serial_sequence('transaction_record', 'id'), (SELECT max(id) FROM transaction_record));
 END $$;
+
+-- Codes de remise des transactions payees du seed : V5 ne les donne qu'aux lignes deja presentes
+-- lors de la migration, et ce script insere les siennes apres. Idempotent (handover_code IS NULL),
+-- rejoue sans effet a chaque demarrage. Declaration du contenu : les reservations du seed datent
+-- d'avant cette regle, on leur en donne une pour que l'ecran du vendeur ne soit pas vide.
+UPDATE transaction_record
+SET handover_code = lpad(floor(random() * 1000000)::int::text, 6, '0')
+WHERE seller_status = 'confirmed' AND buyer_status = 'confirmed' AND handover_code IS NULL;
+
+UPDATE transaction_record
+SET content_description = 'Vêtements et livres, pas de liquides.', prohibited_items_accepted = true
+WHERE content_description IS NULL;

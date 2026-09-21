@@ -58,6 +58,7 @@ public class TransactionMailer {
             case PAYMENT_CONFIRMED -> "Paiement reçu · Payment received · " + route;
             case COMPLETED -> "Transaction terminée · Transaction completed · " + route;
             case CANCELLED -> "Transaction annulée · Transaction cancelled · " + route;
+            case EXPIRED -> "Demande expirée · Request expired · " + route;
         };
     }
 
@@ -84,6 +85,8 @@ public class TransactionMailer {
                     .formatted(otherFr, route, dateFr);
             case CANCELLED -> "%s a annulé la transaction de %s kg sur le vol %s du %s."
                     .formatted(otherFr, weight, route, dateFr);
+            case EXPIRED -> "Le vol %s du %s est parti sans que la réservation de %s kg soit payée : elle a été annulée automatiquement."
+                    .formatted(route, dateFr, weight);
         };
         String english = switch (notice.kind()) {
             case NEW_REQUEST -> "%s would like to book %s kg on your %s flight on %s.\nAccept or decline the request in the app."
@@ -98,6 +101,8 @@ public class TransactionMailer {
                     .formatted(otherEn, route, dateEn);
             case CANCELLED -> "%s cancelled the transaction for %s kg on the %s flight on %s."
                     .formatted(otherEn, weight, route, dateEn);
+            case EXPIRED -> "The %s flight on %s left before the %s kg booking was paid: it was cancelled automatically."
+                    .formatted(route, dateEn, weight);
         };
 
         return """

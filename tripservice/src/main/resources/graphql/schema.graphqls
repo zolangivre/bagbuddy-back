@@ -21,6 +21,12 @@ type Query {
 
     trip(id: ID!): Trip!
 
+    "Annonces par identifiant, dans l'ordre demande ; les ids inconnus sont ignores. 200 ids au plus."
+    tripsByIds(ids: [ID!]!): [Trip!]!
+
+    "Alertes de trajet de l'appelant, les plus recentes d'abord."
+    myTripAlerts: [TripAlert!]!
+
     "Les plus recentes d'abord. limit/offset optionnels, 200 elements au plus par page."
     tripsByUser(userId: String!, limit: Int, offset: Int): [Trip!]!
 
@@ -37,6 +43,16 @@ type Mutation {
 
     "Vrai si l'annonce a bien ete supprimee. Reserve au proprietaire."
     deleteTrip(id: ID!): Boolean!
+
+    """
+    Cree une alerte : un email a chaque annonce publiee qui correspond. L'email est celui du
+    jeton. Codes : alert_needs_email, alert_invalid_route, alert_invalid_date,
+    alert_invalid_flex, too_many_alerts (10 par membre).
+    """
+    createTripAlert(input: TripAlertInput!): TripAlert!
+
+    "Vrai si l'alerte existait et appartenait a l'appelant."
+    deleteTripAlert(id: ID!): Boolean!
 }
 
 type Trip {
@@ -81,6 +97,31 @@ type UserInfoView {
 }
 
 "Les tris de la liste d'annonces. id departage les egalites, pour une pagination stable."
+type TripAlert {
+    id: ID!
+    departureAirport: String!
+    arrivalAirport: String!
+    "YYYY-MM-DD, ou nul : toutes les dates."
+    date: String
+    flexDays: Int!
+    maxPricePerKg: BigDecimal
+    minWeight: BigDecimal
+    createdAt: DateTime!
+}
+
+input TripAlertInput {
+    departureAirport: String!
+    arrivalAirport: String!
+    "YYYY-MM-DD, facultatif."
+    date: String
+    "0 a 30, ignore sans date."
+    flexDays: Int
+    maxPricePerKg: BigDecimal
+    minWeight: BigDecimal
+    "Langue de l'email : en ou fr."
+    language: String
+}
+
 enum TripSort {
     RECENT
     EARLIEST_DEPARTURE

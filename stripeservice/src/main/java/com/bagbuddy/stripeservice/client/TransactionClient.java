@@ -1,6 +1,5 @@
 package com.bagbuddy.stripeservice.client;
 
-import com.bagbuddy.stripeservice.web.ServiceUnavailableException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.graphql.ResponseError;
@@ -63,7 +62,7 @@ public class TransactionClient {
     /** Lu avec le jeton de l'acheteur, pour que transactionservice tranche la participation. */
     public TransactionSnapshot fetchAsCaller(Long transactionId, String callerToken) {
         return circuitBreakerFactory.create(CIRCUIT)
-                .run(() -> doFetchAsCaller(transactionId, callerToken), failFast());
+                .run(() -> doFetchAsCaller(transactionId, callerToken), CircuitFallbacks.failFast(CIRCUIT));
     }
 
     private TransactionSnapshot doFetchAsCaller(Long transactionId, String callerToken) {
@@ -98,22 +97,6 @@ public class TransactionClient {
                         "currency", currency))
                 .retrieve()
                 .toBodilessEntity();
-    }
-
-    /**
-     * Le repli ne fabrique aucune valeur de remplacement : les reponses metier
-     * (introuvable, non-participant) remontent intactes, et tout le reste devient
-     * une indisponibilite explicite plutot qu'une erreur interne opaque.
-     */
-    private static <T> java.util.function.Function<Throwable, T> failFast() {
-        return throwable -> {
-            if (throwable instanceof NoSuchElementException
-                    || throwable instanceof IllegalArgumentException
-                    || throwable instanceof AccessDeniedException) {
-                throw (RuntimeException) throwable;
-            }
-            throw new ServiceUnavailableException(CIRCUIT, throwable);
-        };
     }
 
     private RuntimeException translate(List<ResponseError> errors, Long transactionId) {

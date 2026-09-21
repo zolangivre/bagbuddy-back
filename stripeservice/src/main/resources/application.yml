@@ -102,6 +102,11 @@ spring.security.oauth2.client:
 bagbuddy.service-client.registration-id: bagbuddy-service
 bagbuddy.transaction-service.url: ${TRANSACTION_SERVICE_URL:http://localhost:8083}
 bagbuddy.stripe.currency: ${STRIPE_CURRENCY:eur}
+# Le compte Connect d'un voyageur est enregistre dans son profil userservice.
+bagbuddy.user-service.url: ${USER_SERVICE_URL:http://localhost:8086}
+# Stripe Connect Express : pays des comptes crees, et retour sur le front apres l'onboarding.
+bagbuddy.stripe.connect.country: ${STRIPE_CONNECT_COUNTRY:FR}
+bagbuddy.front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
 
 # --- Appels sortants ---
 # Delais courts et explicites : sans eux, un service muet fait patienter le
@@ -113,6 +118,18 @@ spring.http.client:
 resilience4j:
   circuitbreaker:
     instances:
+      userservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException
       transactionservice:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 10

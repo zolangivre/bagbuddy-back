@@ -180,7 +180,6 @@ class UserProfileSecurityTest {
         mockMvc.perform(graphql("mutation($i: UpdateProfileInput!) { updateProfile(input: $i) { bio } }",
                         Map.of("i", Map.of(
                                 "phone", "+33600000000",
-                                "stripeAccountId", "acct_alice",
                                 "bio", "Bonjour")))
                         // Les claims d'identite sont remirrorees a chaque appel : un jeton
                         // ampute les effacerait, comme le ferait un vrai jeton incomplet.

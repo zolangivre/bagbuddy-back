@@ -30,7 +30,7 @@ public class TransactionMetrics {
         meters.counter("bagbuddy.transaction.transitions",
                         "seller_status", String.valueOf(event.sellerStatus()),
                         "buyer_status", String.valueOf(event.buyerStatus()),
-                        "actor", event.actor() == null ? "none" : event.actor().name().toLowerCase(Locale.ROOT))
+                        "actor", event.actor().name().toLowerCase(Locale.ROOT))
                 .increment();
     }
 }

@@ -20,7 +20,4 @@ public class UpdateProfileRequest {
     @Size(max = 32)
     @Pattern(regexp = "^$|^[+0-9 ().-]{6,32}$", message = "phone has an unexpected format")
     private String phone;
-
-    @Size(max = 255)
-    private String stripeAccountId;
 }

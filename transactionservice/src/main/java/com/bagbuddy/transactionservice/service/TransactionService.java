@@ -12,6 +12,7 @@ import com.bagbuddy.transactionservice.service.TransactionStateMachine.Actor;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Effect;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.StatusPair;
 import com.bagbuddy.transactionservice.service.TransactionStateMachine.Transition;
+import com.bagbuddy.transactionservice.web.BusinessException;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +26,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
@@ -52,19 +56,23 @@ public class TransactionService {
     private final ApplicationEventPublisher events;
     /** Echecs de restitution de capacite : du poids pris sur une annonce que personne ne tient plus. */
     private final MeterRegistry meters;
+    /** Remboursement et versement d'une transaction payee qui se termine ou s'annule. */
+    private final SettlementService settlement;
 
     public TransactionService(TransactionRepository transactionRepository,
                               TripClient tripClient,
                               TransactionStateMachine stateMachine,
                               TransactionTemplate writeTx,
                               ApplicationEventPublisher events,
-                              MeterRegistry meters) {
+                              MeterRegistry meters,
+                              SettlementService settlement) {
         this.transactionRepository = transactionRepository;
         this.tripClient = tripClient;
         this.stateMachine = stateMachine;
         this.writeTx = writeTx;
         this.events = events;
         this.meters = meters;
+        this.settlement = settlement;
     }
 
     /**
@@ -122,6 +130,17 @@ public class TransactionService {
         if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("weight must be greater than zero");
         }
+        // Le voyageur transporte ce qu'on lui confie : il doit savoir quoi avant d'accepter, et
+        // l'acheteur s'engage sur la liste des objets interdits. Aucune reservation sans les deux.
+        String content = body.getContentDescription() == null ? "" : body.getContentDescription().trim();
+        if (content.isEmpty() || content.length() > 500) {
+            throw new BusinessException("content_description_required",
+                    "Describe what the traveller will carry (500 characters at most).");
+        }
+        if (!body.isProhibitedItemsAccepted()) {
+            throw new BusinessException("prohibited_items_not_accepted",
+                    "The list of prohibited items must be accepted before booking.");
+        }
 
         TripSnapshot trip = tripClient.fetch(body.getListingId());
         if (trip == null || trip.getUserId() == null) {
@@ -156,6 +175,8 @@ public class TransactionService {
         tx.setBuyerStatus(initial.buyerStatus());
         tx.setBuyerReview(false);
         tx.setSellerReview(false);
+        tx.setContentDescription(content);
+        tx.setProhibitedItemsAccepted(true);
         // Payment fields are only ever written by the Stripe webhook (markPaid).
         Transaction saved = transactionRepository.save(tx);
         events.publishEvent(TransactionStatusChanged.of(saved, Actor.BUYER));
@@ -176,7 +197,7 @@ public class TransactionService {
         requireParticipant(snapshot, callerSub);
         Actor actor = callerSub.equals(snapshot.getBuyerId()) ? Actor.BUYER : Actor.SELLER;
         Transition planned = stateMachine
-                .resolve(pairOf(snapshot), requestedPair(snapshot, body), actor)
+                .resolve(StatusPair.of(snapshot), requestedPair(snapshot, body), actor)
                 .orElse(null);
 
         // --- Phase 2 : appels a tripservice, aucune connexion DB retenue pendant l'attente.
@@ -212,7 +233,7 @@ public class TransactionService {
 
         // --- Phase 4 : effets distants qui ne doivent suivre qu'une ecriture validee.
         if (expected == Effect.RELEASE_CAPACITY
-                && stateMachine.cancelledPair().equals(pairOf(updated))) {
+                && stateMachine.cancelledPair().equals(StatusPair.of(updated))) {
             releaseCapacity(updated.getListingId(), id);
         }
         return updated;
@@ -226,7 +247,7 @@ public class TransactionService {
     private void compensateReservation(Long id, Long listingId) {
         try {
             Transaction current = transactionRepository.findById(id).orElse(null);
-            if (current != null && stateMachine.holdsCapacity(pairOf(current))) {
+            if (current != null && stateMachine.holdsCapacity(StatusPair.of(current))) {
                 return;
             }
             tripClient.release(listingId, id);
@@ -273,7 +294,7 @@ public class TransactionService {
         }
 
         StatusPair to = requestedPair(existing, body);
-        Transition transition = stateMachine.resolve(pairOf(existing), to, actor).orElse(null);
+        Transition transition = stateMachine.resolve(StatusPair.of(existing), to, actor).orElse(null);
         if (transition == null) {
             return transactionRepository.save(existing);
         }
@@ -287,7 +308,13 @@ public class TransactionService {
                 existing.setWeight(repricing.weight());
                 existing.setTotal(repricing.total());
             }
-            case SETTLE_PAYMENT -> settlePayment(existing);
+            case SETTLE_PAYMENT -> {
+                settlePayment(existing);
+                // Paye : le code de remise que l'acheteur donnera au destinataire.
+                if (existing.getHandoverCode() == null) {
+                    existing.setHandoverCode(newHandoverCode());
+                }
+            }
             case RESERVE_CAPACITY -> {
                 // Refusee puis re-tarifee entre la phase 1 et ici : le poids reserve n'est plus
                 // celui de la demande. On refuse, et la compensation rend ce qui a ete pris.
@@ -301,6 +328,7 @@ public class TransactionService {
 
         existing.setSellerStatus(to.sellerStatus());
         existing.setBuyerStatus(to.buyerStatus());
+        planSettlement(existing, actor);
         // Dans la transaction de writeTx : l'email ne part qu'une fois l'ecriture validee.
         events.publishEvent(TransactionStatusChanged.of(existing, actor));
         return transactionRepository.save(existing);
@@ -344,19 +372,19 @@ public class TransactionService {
     private boolean expireOne(Long id, String now) {
         Expiry expiry = writeTx.execute(status -> {
             Transaction tx = transactionRepository.findByIdForUpdate(id).orElse(null);
-            if (tx == null || !stateMachine.isExpirable(pairOf(tx))) {
+            if (tx == null || !stateMachine.isExpirable(StatusPair.of(tx))) {
                 return null;
             }
             String departure = tx.getListingInfo() == null ? null : tx.getListingInfo().getDepartureDate();
             if (departure == null || departure.length() < 16 || departure.compareTo(now) >= 0) {
                 return null;
             }
-            boolean held = stateMachine.holdsCapacity(pairOf(tx));
+            boolean held = stateMachine.holdsCapacity(StatusPair.of(tx));
             StatusPair cancelled = stateMachine.cancelledPair();
             tx.setSellerStatus(cancelled.sellerStatus());
             tx.setBuyerStatus(cancelled.buyerStatus());
             // Aucun acteur : ni l'acheteur ni le vendeur n'a fait ce geste.
-            events.publishEvent(TransactionStatusChanged.of(tx, null));
+            events.publishEvent(TransactionStatusChanged.of(tx, Actor.SYSTEM));
             transactionRepository.save(tx);
             return new Expiry(tx.getListingId(), held);
         });
@@ -369,8 +397,23 @@ public class TransactionService {
         return true;
     }
 
-    private StatusPair pairOf(Transaction tx) {
-        return new StatusPair(tx.getSellerStatus(), tx.getBuyerStatus());
+    /**
+     * Dans la transaction d'ecriture, quel que soit le chemin (updateTransaction, confirmHandover) :
+     * une transaction payee qui se termine ou s'annule recoit ses montants de reglement en meme
+     * temps que son nouveau statut. Sans paiement, rien a regler. Les appels a Stripe, eux, ne
+     * retiennent pas la requete : ils partent apres le commit, sur un autre thread.
+     */
+    private void planSettlement(Transaction tx, Actor actor) {
+        StatusPair reached = StatusPair.of(tx);
+        if (stateMachine.completedPair().equals(reached)) {
+            settlement.planCompletion(tx);
+        } else if (stateMachine.cancelledPair().equals(reached)) {
+            settlement.planCancellation(tx, actor);
+        }
+        // Execute apres le commit, hors de la requete (SettlementService.onSettlementDue).
+        if (settlement.hasPendingWork(tx)) {
+            events.publishEvent(new SettlementDue(tx.getId()));
+        }
     }
 
     private StatusPair requestedPair(Transaction existing, Transaction body) {
@@ -450,7 +493,7 @@ public class TransactionService {
             // Stripe retries webhooks; recording the same payment twice must be a no-op.
             return tx;
         }
-        if (!stateMachine.awaitingPaymentPair().equals(pairOf(tx))) {
+        if (!stateMachine.awaitingPaymentPair().equals(StatusPair.of(tx))) {
             throw new IllegalArgumentException("Transaction " + id + " is not awaiting payment");
         }
         if (amount == null || amount != minorUnits(tx.getTotal())) {
@@ -464,13 +507,67 @@ public class TransactionService {
         return transactionRepository.save(tx);
     }
 
+    /**
+     * Le voyageur clot la transaction en saisissant le code que le destinataire lui donne a la
+     * livraison. C'est la preuve de remise : l'acheteur a recu ce code a son paiement et ne l'a
+     * donne qu'a la personne qui recoit le colis.
+     *
+     * Les essais sont comptes dans la transaction d'ecriture, qui est validee meme pour un code
+     * faux : l'erreur n'est levee qu'apres, pour que le compteur ne soit pas annule avec elle. Au
+     * bout de Transaction.MAX_HANDOVER_ATTEMPTS le code est bloque, ce qui rend vaine une recherche
+     * par essais successifs (6 chiffres, 5 essais).
+     */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public Transaction confirmHandover(Long id, String code, String callerSub) {
+        Transaction tx = writeTx.execute(status -> {
+            Transaction current = transactionRepository.findByIdForUpdate(id)
+                    .orElseThrow(() -> new NoSuchElementException("Transaction not found with id " + id));
+            requireParticipant(current, callerSub);
+            if (!callerSub.equals(current.getSellerId())) {
+                throw new AccessDeniedException("Only the traveller confirms the handover");
+            }
+            if (!stateMachine.confirmedPair().equals(StatusPair.of(current)) || current.getHandoverCode() == null) {
+                throw new BusinessException("handover_not_expected",
+                        "This transaction is not waiting for a handover.");
+            }
+            if (current.isHandoverLocked()) {
+                return current;
+            }
+            String submitted = code == null ? "" : code.replaceAll("\\s", "");
+            if (!MessageDigest.isEqual(
+                    submitted.getBytes(StandardCharsets.UTF_8),
+                    current.getHandoverCode().getBytes(StandardCharsets.UTF_8))) {
+                current.setHandoverAttempts(current.getHandoverAttempts() + 1);
+                return transactionRepository.save(current);
+            }
+            StatusPair done = stateMachine.completedPair();
+            current.setSellerStatus(done.sellerStatus());
+            current.setBuyerStatus(done.buyerStatus());
+            planSettlement(current, Actor.SELLER);
+            events.publishEvent(TransactionStatusChanged.of(current, Actor.SELLER));
+            return transactionRepository.save(current);
+        });
+        if (stateMachine.isCompleted(StatusPair.of(tx))) {
+            return tx;
+        }
+        throw tx.isHandoverLocked()
+                ? new BusinessException("handover_locked", "Too many wrong codes: the buyer has to confirm the delivery.")
+                : new BusinessException("invalid_handover_code", "This handover code is not the right one.");
+    }
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private static String newHandoverCode() {
+        return "%06d".formatted(RANDOM.nextInt(1_000_000));
+    }
+
     @Transactional
     public void delete(Long id, String callerSub) {
         Transaction tx = findOrThrow(id);
         requireParticipant(tx, callerSub);
         // Acceptee ou payee, la transaction tient du poids sur l'annonce, et peut-etre l'argent de
         // l'acheteur : la supprimer effacerait l'engagement sans rien rendre. On annule d'abord.
-        if (stateMachine.holdsCapacity(pairOf(tx)) && !stateMachine.isCompleted(pairOf(tx))) {
+        if (stateMachine.holdsCapacity(StatusPair.of(tx)) && !stateMachine.isCompleted(StatusPair.of(tx))) {
             throw new IllegalArgumentException(
                     "An accepted or paid transaction must be cancelled before it can be deleted");
         }

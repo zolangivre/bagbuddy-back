@@ -86,6 +86,13 @@ logging:
 # issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
 # jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
 bagbuddy:
+  # --- Alertes de trajet ---
+  alerts:
+    enabled: ${ALERTS_ENABLED:true}
+    max-per-member: ${ALERTS_MAX_PER_MEMBER:10}
+    from: ${MAIL_FROM:BagBuddy <no-reply@bagbuddy.local>}
+    # Les liens ouvrent l'annonce sur le front web.
+    front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
   auth:
     # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
     issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
@@ -120,3 +127,20 @@ management:
       show-details: when-authorized
       probes:
         enabled: true
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
+
+# En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
+spring.mail:
+  host: ${SMTP_HOST:localhost}
+  port: ${SMTP_PORT:1025}
+  username: ${SMTP_USERNAME:}
+  password: ${SMTP_PASSWORD:}
+  properties:
+    mail.smtp.auth: ${SMTP_AUTH:false}
+    mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+    mail.smtp.connectiontimeout: 5000
+    mail.smtp.timeout: 5000
+    mail.smtp.writetimeout: 5000

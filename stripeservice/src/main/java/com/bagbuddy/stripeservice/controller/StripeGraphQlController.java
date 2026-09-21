@@ -1,5 +1,6 @@
 package com.bagbuddy.stripeservice.controller;
 
+import com.bagbuddy.stripeservice.service.PayoutService;
 import com.bagbuddy.stripeservice.service.StripeService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.graphql.data.method.annotation.Argument;
@@ -17,12 +18,14 @@ import org.springframework.stereotype.Controller;
 public class StripeGraphQlController {
 
     private final StripeService stripeService;
+    private final PayoutService payoutService;
 
     @Value("${STRIPE_PUBLISHABLE_KEY}")
     private String publishableKey;
 
-    public StripeGraphQlController(StripeService stripeService) {
+    public StripeGraphQlController(StripeService stripeService, PayoutService payoutService) {
         this.stripeService = stripeService;
+        this.payoutService = payoutService;
     }
 
     @QueryMapping
@@ -32,9 +35,21 @@ public class StripeGraphQlController {
 
     @MutationMapping
     public PaymentIntentPayload createPaymentIntent(@Argument Long transactionId,
-                                                    @AuthenticationPrincipal Jwt jwt) throws Exception {
-        return new PaymentIntentPayload(
-                stripeService.createPaymentIntent(transactionId, jwt).getClientSecret());
+                                                    @AuthenticationPrincipal Jwt jwt) {
+        return new PaymentIntentPayload(stripeService.createPaymentIntent(transactionId, jwt));
+    }
+
+    @QueryMapping
+    public PayoutService.AccountStatus payoutAccount(@AuthenticationPrincipal Jwt jwt) {
+        return payoutService.accountStatus(jwt);
+    }
+
+    @MutationMapping
+    public PayoutOnboarding startPayoutOnboarding(@AuthenticationPrincipal Jwt jwt) {
+        return new PayoutOnboarding(payoutService.startOnboarding(jwt));
+    }
+
+    public record PayoutOnboarding(String url) {
     }
 
     public record StripeConfig(String publishableKey) {

@@ -71,6 +71,8 @@ public class SecurityConfig {
                         // point d'entree est donc ouvert, et c'est @PreAuthorize resolver par
                         // resolver qui exige l'authentification pour tout le reste.
                         .requestMatchers(HttpMethod.POST, "/users/graphql").permitAll()
+                        // Compte de versement : lu et ecrit par stripeservice uniquement.
+                        .requestMatchers("/users/internal/**").hasRole("SERVICE")
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(jwtAuthenticationConverter())));

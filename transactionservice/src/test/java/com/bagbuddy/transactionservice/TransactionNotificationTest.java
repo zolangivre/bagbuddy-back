@@ -140,7 +140,8 @@ class TransactionNotificationTest {
 
         mockMvc.perform(graphql("""
                         mutation($input: CreateTransactionInput!) { createTransaction(input: $input) { id } }
-                        """, Map.of("input", Map.of("listingId", 1, "weight", 2)))
+                        """, Map.of("input", Map.of("listingId", 1, "weight", 2,
+                                "contentDescription", "Vetements", "prohibitedItemsAccepted", true)))
                         .with(jwt().jwt(j -> j.subject(BUYER)
                                 .claim("email", "buyer@example.com").claim("given_name", "Camille"))))
                 .andExpect(jsonPath("$.errors").doesNotExist());
@@ -229,8 +230,12 @@ class TransactionNotificationTest {
         for (Kind kind : Kind.values()) {
             Notice notice = new Notice(kind, event.seller(), event.buyer());
             String body = real.body(notice, event);
+            assertThat(body).contains("Bonjour Moussa", "Hello Moussa", "CDG → DSS");
+            if (kind != Kind.EXPIRED) {
+                // Une expiration n'a pas d'auteur : l'email ne nomme pas l'autre partie.
+                assertThat(body).contains("Camille");
+            }
             assertThat(body)
-                    .contains("Bonjour Moussa", "Hello Moussa", "Camille", "CDG → DSS")
                     .contains("3 octobre 2026", "October 3, 2026")
                     .contains("http://localhost:4200/transaction-detail?transactionId=" + tx.getId());
             assertThat(real.subject(notice, event)).contains("CDG → DSS");

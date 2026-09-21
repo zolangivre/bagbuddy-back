@@ -251,7 +251,8 @@ class TransactionSecurityTest {
                                 total buyerId sellerId sellerStatus buyerStatus paidAt
                             }
                         }
-                        """, Map.of("input", Map.of("listingId", 1, "weight", 2)))
+                        """, Map.of("input", Map.of("listingId", 1, "weight", 2,
+                                "contentDescription", "Vetements", "prohibitedItemsAccepted", true)))
                         .with(jwt().jwt(j -> j.subject(BUYER).claim("email", "buyer@example.com"))))
                 .andExpect(status().isOk())
                 // 2 kg x 12.50 EUR : le montant vient de l'annonce, pas de l'appelant.

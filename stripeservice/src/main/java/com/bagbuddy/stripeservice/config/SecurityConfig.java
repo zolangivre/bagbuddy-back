@@ -55,6 +55,8 @@ public class SecurityConfig {
                         // qu'elle emet passent par /stripe/graphql et restent authentifiees.
                         .requestMatchers("/stripe/graphiql/**").permitAll()
                         .requestMatchers(org.springframework.http.HttpMethod.POST, "/stripe/webhook").permitAll()
+                        // Remboursements et versements : seul transactionservice, avec le role 'service'.
+                        .requestMatchers("/stripe/internal/**").hasRole("SERVICE")
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(jwtAuthenticationConverter())));

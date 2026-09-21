@@ -117,6 +117,16 @@ spring.security.oauth2.client:
 
 bagbuddy.service-client.registration-id: bagbuddy-service
 bagbuddy.trip-service.url: ${TRIP_SERVICE_URL:http://localhost:8082}
+# Remboursements et versements, executes par stripeservice (SettlementService).
+bagbuddy.stripe-service.url: ${STRIPE_SERVICE_URL:http://localhost:8085}
+
+# --- Reglement des transactions payees (SettlementPolicy) ---
+bagbuddy.payments:
+  platform-fee-percent: ${PLATFORM_FEE_PERCENT:10}
+  # L'acheteur qui annule moins de 24 h avant le depart n'est rembourse qu'a moitie : le voyageur a
+  # garde la place jusqu'au bout.
+  late-cancellation-window: ${LATE_CANCELLATION_WINDOW:PT24H}
+  late-cancellation-refund-percent: ${LATE_CANCELLATION_REFUND_PERCENT:50}
 
 # --- Machine a etats des transactions ---
 # Le vocabulaire doit rester aligne sur TRANSACTION_STATUS du front (repo bagbuddy-front).
@@ -186,6 +196,22 @@ resilience4j:
           - java.util.NoSuchElementException
           - java.lang.IllegalArgumentException
           - org.springframework.security.access.AccessDeniedException
+      stripeservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
 
 # En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
 spring.mail:

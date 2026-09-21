@@ -253,6 +253,15 @@ services:
       DATABASE_URL: jdbc:postgresql://postgres:5432/${TRIP_SERVICE_DB:-tripservice}
       SPRING_DATASOURCE_USERNAME: ${TRIP_SERVICE_USER:-tripservice}
       SPRING_DATASOURCE_PASSWORD: ${TRIP_SERVICE_PASSWORD}
+      # Alertes de trajet : meme serveur SMTP que userservice et transactionservice.
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST manquant}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:?SMTP_USERNAME manquant}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD manquant}
+      SMTP_AUTH: "true"
+      SMTP_STARTTLS: "true"
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM manquant}
     depends_on: *service-depends-on
 
   transaction-service:
@@ -267,6 +276,7 @@ services:
       KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
       TRIP_SERVICE_URL: http://trip-service:8082
+      STRIPE_SERVICE_URL: http://stripe-service:8085
       # PAYMENTS_REQUIRE_STRIPE n'est volontairement pas defini : il vaut true, et un
       # paiement n'est confirme que par le webhook Stripe signe.
       # Notifications email des transitions : meme serveur SMTP que userservice.
@@ -304,6 +314,8 @@ services:
       KEYCLOAK_SERVICE_CLIENT_ID: bagbuddy
       KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
       TRANSACTION_SERVICE_URL: http://transaction-service:8083
+      USER_SERVICE_URL: http://user-service:8086
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:?BAGBUDDY_FRONT_URL manquant}
     depends_on:
       keycloak:
         condition: service_started

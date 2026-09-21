@@ -255,7 +255,8 @@ class TransactionCapacityTest {
 
         mockMvc.perform(graphql("""
                         mutation($input: CreateTransactionInput!) { createTransaction(input: $input) { id } }
-                        """, Map.of("input", Map.of("listingId", 1, "weight", 2)))
+                        """, Map.of("input", Map.of("listingId", 1, "weight", 2,
+                                "contentDescription", "Vetements", "prohibitedItemsAccepted", true)))
                         .with(jwt().jwt(j -> j.subject(BUYER))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.errors[0].extensions.classification").value("BAD_REQUEST"));

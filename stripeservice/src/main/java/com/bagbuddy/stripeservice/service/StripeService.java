@@ -2,11 +2,11 @@ package com.bagbuddy.stripeservice.service;
 
 import com.bagbuddy.stripeservice.client.TransactionClient;
 import com.bagbuddy.stripeservice.client.TransactionSnapshot;
+import com.bagbuddy.stripeservice.gateway.StripeGateway;
 import com.stripe.exception.SignatureVerificationException;
 import com.stripe.model.Event;
 import com.stripe.model.PaymentIntent;
 import com.stripe.net.Webhook;
-import com.stripe.param.PaymentIntentCreateParams;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +18,7 @@ import org.springframework.web.client.HttpClientErrorException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Map;
 
 @Service
 public class StripeService {
@@ -30,8 +31,10 @@ public class StripeService {
     private final String awaitingPaymentStatus;
     private final String paymentRequiredStatus;
     private final MeterRegistry meters;
+    private final StripeGateway stripe;
 
     public StripeService(TransactionClient transactionClient,
+                         StripeGateway stripe,
                          MeterRegistry meters,
                          @Value("${bagbuddy.stripe.currency:eur}") String currency,
                          @Value("${STRIPE_WEBHOOK_SECRET}") String webhookSecret,
@@ -47,6 +50,7 @@ public class StripeService {
         this.awaitingPaymentStatus = awaitingPaymentStatus;
         this.paymentRequiredStatus = paymentRequiredStatus;
         this.meters = meters;
+        this.stripe = stripe;
     }
 
     /**
@@ -62,7 +66,8 @@ public class StripeService {
      * itself priced against the listing. Nothing about the charge comes from the client
      * beyond the id of the transaction being paid.
      */
-    public PaymentIntent createPaymentIntent(Long transactionId, Jwt caller) throws Exception {
+    /** @return le client secret du PaymentIntent, a remettre a Stripe.js */
+    public String createPaymentIntent(Long transactionId, Jwt caller) {
         if (transactionId == null) {
             throw new IllegalArgumentException("transactionId is required");
         }
@@ -91,20 +96,10 @@ public class StripeService {
             throw new IllegalArgumentException("Transaction " + transactionId + " has a non-positive amount");
         }
 
-        PaymentIntentCreateParams params = PaymentIntentCreateParams.builder()
-                .setAmount(amountInMinorUnits)
-                .setCurrency(currency)
-                .setAutomaticPaymentMethods(
-                        PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
-                                .setEnabled(true)
-                                .build())
-                // Metadata is built server-side; the client cannot inject arbitrary keys.
-                .putMetadata("transactionId", String.valueOf(tx.getId()))
-                .putMetadata("buyerId", tx.getBuyerId())
-                .putMetadata("sellerId", tx.getSellerId())
-                .build();
-
-        return PaymentIntent.create(params);
+        // Le groupe relie paiement, remboursement et versement d'une meme transaction chez Stripe.
+        return stripe.createPaymentIntent(amountInMinorUnits, currency,
+                PayoutService.transferGroup(transactionId),
+                Map.of("transactionId", String.valueOf(transactionId), "buyerId", tx.getBuyerId()));
     }
 
     /**
