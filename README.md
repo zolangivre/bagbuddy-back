@@ -14,13 +14,22 @@ séparé : `bagbuddy-front`. Les deux se lancent indépendamment ; en local le
 front tape sur la gateway en `http://localhost:8080` et sur Keycloak en
 `http://localhost:8000`.
 
+**Ce que l'application fait.** Un voyageur publie le poids disponible dans ses
+bagages, un expéditeur en réserve une partie, ils se parlent, l'argent est
+encaissé puis réparti à la fin, et chacun note l'autre. Autour de ça : comptes et
+mots de passe, recherche et alertes sur les annonces, messagerie, code de remise
+du colis, avis, favoris, signalements, emails à chaque étape. Le détail est dans
+[Le domaine métier](#le-domaine-métier).
+
 **Sommaire**
 
 1. [Développement local](#développement-local)
    — [lancer](#tout-lancer) · [données de test](#données-de-test) · [Stripe en local](#stripe-en-local) · [commandes](#commandes-du-quotidien) · [tests](#tests)
-2. [Production](#production)
+2. [Le domaine métier](#le-domaine-métier)
+   — [annonces](#annonces) · [réservations](#réservations) · [avis](#avis) · [favoris, signalements](#favoris-signalements) · [emails](#les-emails-envoyés) · [comptes](#comptes) · [réglages](#les-réglages-métier)
+3. [Production](#production)
    — [architecture](#architecture-de-production) · [déploiement pas à pas](#déploiement-pas-à-pas) · [exploitation](#exploitation) · [dépannage](#dépannage)
-3. [Architecture](#architecture)
+4. [Architecture technique](#architecture)
    — [service discovery](#service-discovery) · [base de données](#base-de-données-et-migrations) · [observabilité](#observabilité) · [résilience](#résilience-et-abus) · [GraphQL](#api-graphql) · [authentification](#authentification) · [front web](#front-web) · [ajouter un microservice](#ajouter-un-microservice)
 
 | Fichier | Rôle |
@@ -30,7 +39,18 @@ front tape sur la gateway en `http://localhost:8080` et sur Keycloak en
 | `.env.example` / `.env.prod.example` | modèles de configuration dev / prod (les vrais `.env` ne sont jamais commités) |
 | `keycloak/import/bagbuddy-realm.json` | realm Keycloak, commun au dev et à la prod |
 | `seed/` | données de test, **dev uniquement** (comptes Keycloak + contenu des bases) |
-| `deploy/` | fichiers de prod : `Caddyfile`, script de création des bases, script de sauvegarde |
+| `deploy/` | fichiers de prod : `Caddyfile`, script de création des bases, script de sauvegarde, supervision |
+| `.github/workflows/ci.yml` | CI : tests de chaque service, validation des deux compose, build des images |
+| `CLAUDE.md` | les mêmes décisions, écrites pour un assistant de code |
+
+Chaque service est un **projet Maven indépendant** (Java 21, Spring Boot 3.5.6,
+son propre wrapper `./mvnw`, sa propre base Postgres) dans son dossier :
+`eurekaserver`, `apigateway`, `tripservice`, `transactionservice`,
+`reviewservice`, `stripeservice`, `userservice`. Tous suivent le même découpage
+interne : `controller/` (les resolvers GraphQL, volontairement minces) →
+`service/` (toute la logique) → `repository/` → `model/`, plus le schéma dans
+`src/main/resources/graphql/schema.graphqls` et les migrations dans
+`src/main/resources/db/migration`.
 
 ---
 
@@ -83,6 +103,7 @@ minutes. Une fois debout :
 | Console admin Keycloak  | http://localhost:8000/admin (`KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` du `.env`) |
 | Dashboard Eureka        | http://localhost:8761            |
 | Zipkin (traces)         | http://localhost:9411            |
+| Mailpit (emails sortants) | http://localhost:8025          |
 | trip-service            | http://localhost:8082            |
 | transaction-service     | http://localhost:8083            |
 | review-service          | http://localhost:8084            |
@@ -213,27 +234,44 @@ Après un changement du `.env` :
 
 ## Commandes du quotidien
 
-Rebuild et redémarrer un service après une modif de code :
+Toutes prennent `-f docker-compose.dev.yml`. Les noms de service sont ceux du
+compose : `api-gateway`, `eureka-server`, `trip-service`, `transaction-service`,
+`review-service`, `stripe-service`, `user-service`, `keycloak`, `mailpit`,
+`redis`, `zipkin`.
+
 ```bash
-docker compose -f docker-compose.dev.yml up --build -d <service_name>
+C="docker compose -f docker-compose.dev.yml"    # raccourci pour les lignes qui suivent
+
+$C up --build -d                # tout lancer (ou relancer après un git pull)
+$C up --build -d trip-service   # reconstruire et redémarrer un seul service
+$C restart trip-service         # redémarrer sans reconstruire
+$C up -d                        # appliquer un changement de .env (recrée les conteneurs concernés)
+$C ps                           # qui tourne, qui est healthy
+$C logs -f trip-service         # suivre les logs d'un service
+$C logs -f --tail=200           # ... ou de toute la stack
+$C down                         # tout arrêter, en gardant les bases
+$C down -v                      # tout arrêter ET effacer les bases (relance = données de test neuves)
+$C exec tripservice-db psql -U tripservice -d tripservice   # console SQL (identifiants du .env)
+
+$C --profile stripe-webhooks up -d   # + le relais de webhooks Stripe (voir Stripe en local)
+$C --profile monitoring up -d        # + Prometheus (:9090) et Grafana (:3000)
 ```
 
-Suivre les logs d'un service :
+Lancer un service hors Docker, le reste de la stack tournant dans Docker — utile
+pour attacher un débogueur ou profiter du rechargement à chaud :
+
 ```bash
-docker compose -f docker-compose.dev.yml logs -f <service_name>
+cd tripservice
+./mvnw spring-boot:run     # démarre sur le port de son application.yml (8082 ici)
+./mvnw test                # ses tests
+./mvnw clean package       # son jar
 ```
 
-Tout arrêter (ajoute `-v` pour effacer aussi les bases et repartir des données de test) :
-```bash
-docker compose -f docker-compose.dev.yml down
-```
-
-Lancer un service hors Docker (le reste de la stack tournant dans Docker) :
-```bash
-cd tripservice && ./mvnw spring-boot:run
-```
-Il faut alors exporter les mêmes variables que son bloc dans
-`docker-compose.dev.yml` (`DATABASE_URL`, `PORT`, …).
+Il faut alors lui donner les mêmes variables que son bloc de
+`docker-compose.dev.yml` (`DATABASE_URL`, `PORT`, …) — et arrêter le conteneur
+correspondant, sinon les deux se disputent le port. Sans registre joignable, le
+service démarre quand même : l'échec d'enregistrement Eureka n'est qu'un
+avertissement dans les logs.
 
 ## Tests
 
@@ -267,6 +305,264 @@ concrètement les règles décrites plus bas, en tapant sur le vrai endpoint Gra
 travers toute la chaîne de filtres : accès anonyme refusé, propriété, masquage
 des coordonnées, montant non falsifiable, et refus par le schéma lui-même des
 champs qu'un client ne doit pas pouvoir écrire (`userId`, `total`, `sellerId`…).
+
+---
+
+# Le domaine métier
+
+BagBuddy met en relation un **voyageur**, qui a de la place dans ses bagages, et
+un **expéditeur**, qui a quelque chose à faire transporter. Le voyageur publie
+une annonce, l'expéditeur y réserve du poids, la réservation avance dans une
+machine à états jusqu'à la remise du colis, puis chacun note l'autre.
+
+Le vocabulaire du code suit ce partage : dans une transaction, le **vendeur**
+(`seller`) est le voyageur qui vend du poids, l'**acheteur** (`buyer`) est celui
+qui expédie. Tout le reste en découle.
+
+Ce que le backend gère, service par service :
+
+| Service | Ce qu'il détient |
+| --- | --- |
+| `tripservice` | annonces, capacité restante, recherche, réservations de poids, alertes de trajet |
+| `transactionservice` | réservations et leur machine à états, messagerie, code de remise, notifications, calcul du règlement |
+| `reviewservice` | avis, un par personne et par transaction |
+| `stripeservice` | paiements, remboursements, versements, onboarding Stripe Connect |
+| `userservice` | comptes (inscription, mot de passe, email), profils, favoris, signalements |
+
+## Annonces
+
+Une annonce (`Trip`) décrit un vol : aéroports de départ et d'arrivée (codes
+IATA, stockés en majuscules), date de départ, poids disponible et prix au kilo.
+Elle appartient au `sub` du jeton — `TripInput` n'a volontairement aucun champ
+`userId`, on ne peut donc pas publier sous l'identité d'un autre.
+
+- **Réservable** veut dire : poids restant > 0 **et** date de départ future.
+  C'est calculé à la lecture, jamais lu dans un drapeau `active` qui deviendrait
+  faux tout seul le jour où la date passe.
+- **`searchTrips`** filtre et trie côté serveur : trajet, jour de départ ±
+  `flexDays` (0 à 30), fourchette de prix, poids restant minimum, six tris
+  possibles. La réponse porte aussi `totalCount`, `totalRemainingWeight` et
+  `averagePricePerKg` calculés sur **tout le filtre**, pas sur la page.
+- **La capacité ne se modifie pas à la main.** Le poids restant est décrémenté
+  par le service quand le voyageur accepte une demande, et rendu à l'annulation
+  (voir [Réservations](#réservations)). Baisser le poids total d'une annonce
+  sous ce qui est déjà réservé est refusé, et une annonce qui porte une
+  réservation active ne se supprime pas.
+
+**Alertes de trajet.** Un membre enregistre une recherche (`createTripAlert`) :
+route, fenêtre de dates avec tolérance, prix maximum, poids minimum. À chaque
+publication d'annonce, celles qui correspondent déclenchent un email — jamais à
+l'auteur de l'annonce lui-même. Dix alertes par membre (`ALERTS_MAX_PER_MEMBER`),
+l'adresse est prise dans le jeton et non dans la requête.
+
+## Réservations
+
+L'acheteur réserve un poids sur une annonce (`createTransaction`). Deux choses
+sont vraies dès la création :
+
+- **Le prix n'est jamais fourni par le client.** `transactionservice` lit
+  l'annonce chez `tripservice` et calcule `total = prix au kilo × poids`. Les
+  champs `total`, `sellerId`, `paidAt` et les colonnes Stripe n'existent pas dans
+  les types d'entrée du schéma : les envoyer est une erreur de validation, pas un
+  champ silencieusement ignoré.
+- **Le contenu doit être déclaré** : `contentDescription` (1 à 500 caractères) et
+  `prohibitedItemsAccepted: true` sont obligatoires. Le voyageur lit cette
+  déclaration avant d'accepter. L'app mobile Expo historique ne les envoie pas
+  encore : ses réservations sont refusées tant qu'elle n'est pas mise à jour.
+
+### Le cycle de vie
+
+Les deux colonnes de statut (côté vendeur, côté acheteur) avancent toujours
+ensemble : une transition est une arête entre deux paires, et chaque arête dit
+**qui** a le droit de la franchir. Une paire inconnue du graphe est un
+`BAD_REQUEST`, jamais une écriture silencieuse.
+
+| Départ | Arrivée | Qui | Effet |
+| --- | --- | --- | --- |
+| demande reçue | acceptée / à payer | le voyageur | **le poids quitte l'annonce** |
+| demande reçue | refusée | le voyageur | — |
+| refusée | demande reçue | l'expéditeur | **retarifée** : il redemande avec un autre poids |
+| acceptée / à payer | confirmée (payée) | l'expéditeur | paiement enregistré |
+| confirmée | terminée | l'expéditeur | déclenche le règlement |
+| demande reçue, refusée | annulée | les deux | — |
+| acceptée, confirmée | annulée | les deux | **le poids revient à l'annonce** |
+
+Deux chemins mènent à « terminée » : l'expéditeur confirme la réception, ou le
+voyageur saisit le **code de remise** (voir plus bas). L'arête
+`confirmée → terminée` du tableau est réservée à l'expéditeur, précisément pour
+que le voyageur ne puisse pas clore seul, sans ce code.
+
+Ce qui tient du poids ne disparaît pas non plus en silence : une transaction
+acceptée ou payée doit d'abord être annulée pour être supprimée.
+
+### Ce que garantit la capacité
+
+- **Un double-clic sur « accepter » ne décompte le poids qu'une fois.** Chaque
+  réservation est une ligne `trip_reservation` identifiée par la transaction ;
+  rejouer la même réservation ne change rien, la rejouer avec un autre poids est
+  refusé.
+- **Une réservation qui n'aboutit pas est compensée.** Si le poids est pris puis
+  que l'acceptation échoue (l'acheteur a annulé entre-temps, le poids a changé),
+  il est rendu — sauf si un autre clic a déjà fait aboutir la transaction.
+- **Un échec de restitution ne casse pas l'annulation.** L'annulation reste
+  valide, l'échec est journalisé avec la commande à rejouer et compté
+  (`bagbuddy.capacity.release.failures`, alerte `CapacityNotReleased`). Le poids
+  qui reste pris est le sens sûr de l'erreur.
+
+### Expiration
+
+Toutes les 15 minutes, les transactions dont le vol est parti sans avoir été
+payées — en attente de réponse, refusées, ou acceptées sans paiement — sont
+annulées et rendent leur poids. L'acteur du changement est `SYSTEM`, un acteur
+qu'aucune arête n'autorise : les emails et le règlement reconnaissent ainsi un
+changement décidé par le service, au lieu de le deviner. **Une transaction payée
+n'expire jamais** : l'argent est engagé, son sort ne se décide pas tout seul.
+
+### Paiement, remboursement, versement
+
+L'acheteur paie **la plateforme**, qui garde l'argent jusqu'à la fin de la
+transaction, puis rembourse et/ou verse sa part au voyageur (modèle *separate
+charges and transfers* de Stripe Connect). Le barème — commission, annulation
+tardive — est celui du tableau de [Stripe en local](#stripe-en-local), et il est
+réglable.
+
+Le découpage se fait en deux temps, façon *outbox* :
+
+- **La décision** est prise dans la transaction d'écriture qui mène à
+  « terminée » ou « annulée » : les montants et deux statuts `PENDING` sont
+  écrits en même temps que le statut. `remboursement + commission + versement`
+  tombe juste au centime près.
+- **L'exécution** suit le commit, hors du fil de la requête : les appels à Stripe
+  peuvent s'enchaîner, le membre ne les attend pas. La réponse de la mutation
+  montre donc encore `PENDING`, et le front relit.
+
+Un échec ne défait jamais la transition : une panne laisse `PENDING` et un
+planificateur réessaie toutes les 10 minutes ; un refus définitif passe en
+`FAILED`, est compté et attend un humain ; un voyageur sans compte de versement
+prêt passe en `AWAITING_ACCOUNT`, et son argent part tout seul une fois son
+onboarding terminé. Côté Stripe, rien n'est payé deux fois : un remboursement ou
+un virement existant est retrouvé avant d'en créer un, et chaque création porte
+une clé d'idempotence dérivée de la transaction.
+
+Une transaction jamais payée n'est jamais réglée : il n'y a rien à répartir.
+
+### Code de remise
+
+Quand une transaction passe « confirmée », un code à six chiffres est généré et
+n'est montré **qu'à l'expéditeur**. À la remise du colis, il le donne au
+voyageur, qui clôt la transaction avec `confirmHandover(id, code)`.
+
+- Chaque essai est compté dans sa propre écriture — un code faux incrémente le
+  compteur même si l'appel échoue.
+- Cinq essais ratés bloquent le code (`handover_locked`), ce qui rend une
+  recherche exhaustive sans intérêt.
+
+### Messagerie
+
+Chaque transaction porte un fil réservé à ses deux participants
+(`transactionMessages` / `sendTransactionMessage`) : 1 à 2000 caractères,
+20 messages par minute et par expéditeur, `afterId` pour ne relire que la suite.
+Une transaction annulée garde son fil lisible mais n'accepte plus de message.
+
+## Avis
+
+Un avis se rattache à une transaction terminée. `reviewservice` relit la
+transaction **avec le jeton de l'appelant** : `transactionservice` refuse déjà de
+la servir à qui n'y a pas pris part, ce qui est exactement le contrôle voulu, et
+évite de dupliquer la règle. `CreateReviewInput` ne porte ni `reviewerId` ni
+`revieweeId` — l'auteur vient du jeton, le noté vient de la transaction. Une
+contrainte unique `(reviewer_id, transaction_id)` fait le reste : deux envois
+simultanés ne créent pas deux avis, le second est un `BAD_REQUEST`.
+
+## Favoris, signalements
+
+- **Favoris** : `userservice` ne stocke que des identifiants d'annonces (200 au
+  plus), relus ensuite dans `tripservice` par `tripsByIds`, dans l'ordre demandé
+  et sans faire échouer la liste sur une annonce supprimée. Ajouter ou retirer
+  est idempotent.
+- **Signalements** : `reportMember` écrit en base et envoie un email à
+  `MODERATION_EMAIL` après le commit. L'auteur est toujours l'appelant, on ne se
+  signale pas soi-même, et dix signalements par 24 h suffisent.
+
+## Les emails envoyés
+
+Tous partent **après** le commit et de façon asynchrone : un envoi lent ou un
+SMTP en panne n'échoue jamais l'opération, et une opération refusée n'envoie
+rien. En dev ils arrivent dans Mailpit (http://localhost:8025), sans aucune
+configuration.
+
+| Email | Service | Destinataire |
+| --- | --- | --- |
+| nouvelle demande | transaction | le voyageur |
+| demande acceptée / refusée | transaction | l'expéditeur |
+| paiement confirmé | transaction | le voyageur |
+| transaction terminée / annulée | transaction | celui qui n'a pas fait le geste |
+| transaction expirée | transaction | les deux |
+| annonce correspondant à une alerte | trip | l'auteur de l'alerte |
+| lien de réinitialisation du mot de passe | user | l'adresse du compte |
+| lien de vérification d'adresse | user | l'adresse du compte |
+| signalement d'un membre | user | `MODERATION_EMAIL` |
+
+Les emails de transaction sont en texte brut et **bilingues (français puis
+anglais)** : la langue du membre vit dans son navigateur, aucun service ne la
+connaît. Aucun montant n'y figure (la conversion de devise est une affaire de
+front) et le lien ouvre le détail de la transaction sur `BAGBUDDY_FRONT_URL`.
+`NOTIFICATIONS_ENABLED=false` coupe ceux des transactions,
+`ALERTS_ENABLED=false` ceux des alertes.
+
+## Comptes
+
+Le front web ne renvoie jamais vers les pages de Keycloak : il a ses propres
+écrans. Ce qu'un navigateur ne peut pas porter — les droits d'administration du
+realm — est relayé par `userservice` (détail dans [Front web](#front-web)).
+
+- **Inscription** : `register`, sans jeton, crée un compte Keycloak activé dont
+  l'identifiant est l'email. Le profil applicatif, lui, apparaît tout seul à la
+  première requête `me`.
+- **Mot de passe oublié** : le lien est **le nôtre**, pas celui de Keycloak, qui
+  ouvrirait une page Keycloak. `requestPasswordReset` répond `true` dans tous les
+  cas et avant même de chercher le compte : ni la réponse ni son délai ne disent
+  qui est inscrit. Le jeton n'est stocké qu'en SHA-256, vaut 30 minutes, un email
+  par minute au plus, et un nouveau lien remplace le précédent. Il n'est consommé
+  qu'une fois Keycloak satisfait : un mot de passe refusé par la politique du
+  realm ne coûte pas le lien. La réinitialisation ferme toutes les sessions du
+  compte.
+- **Vérification d'adresse** : même table de jetons, mais un usage distinct — un
+  lien de réinitialisation ne peut pas vérifier une adresse. Valable 24 h, un
+  email par minute. L'envoi du mail et l'écriture du jeton sont dans la même
+  transaction : si le SMTP tombe, le jeton n'existe pas et le membre peut
+  réessayer tout de suite.
+- **Changement d'email ou de mot de passe** : le mot de passe actuel est exigé, et
+  il est vérifié **en demandant un jeton à Keycloak avec** — jamais par un
+  endpoint d'administration — pour que la protection anti-force brute du realm
+  compte l'essai. Un changement d'email repasse par une vérification.
+
+Toutes ces opérations agissent sur le `sub` du jeton. Aucune ne prend
+d'identifiant d'utilisateur en argument : un bug ne peut pas devenir la
+modification du compte d'autrui.
+
+## Les réglages métier
+
+Rien de tout cela n'est en dur : ces valeurs sont des variables d'environnement,
+avec ces défauts.
+
+| Variable | Défaut | Ce qu'elle règle |
+| --- | --- | --- |
+| `PLATFORM_FEE_PERCENT` | `10` | commission de la plateforme sur une transaction terminée |
+| `LATE_CANCELLATION_WINDOW` | `PT24H` | délai avant départ en deçà duquel l'annulation de l'acheteur est tardive |
+| `LATE_CANCELLATION_REFUND_PERCENT` | `50` | part remboursée lors d'une annulation tardive |
+| `PAYMENTS_REQUIRE_STRIPE` | `true` | `false` simule le paiement, sans aucun appel à Stripe |
+| `bagbuddy.transaction.expiry.interval` | `PT15M` | fréquence de la passe d'expiration (`…expiry.enabled=false` la coupe) |
+| `bagbuddy.payments.settlement.interval` | `PT10M` | fréquence des relances de règlement |
+| `PASSWORD_RESET_VALIDITY` / `…_MIN_INTERVAL` | `30m` / `60s` | durée d'un lien de mot de passe, délai entre deux envois |
+| `EMAIL_VERIFICATION_VALIDITY` / `…_MIN_INTERVAL` | `24h` / `60s` | idem pour la vérification d'adresse |
+| `FAVORITES_MAX` | `200` | favoris par membre |
+| `REPORTS_MAX_PER_DAY` | `10` | signalements par membre et par 24 h |
+| `MODERATION_EMAIL` | `moderation@bagbuddy.local` | boîte qui reçoit les signalements |
+| `ALERTS_MAX_PER_MEMBER` | `10` | alertes de trajet par membre |
+| `NOTIFICATIONS_ENABLED`, `ALERTS_ENABLED` | `true` | coupent les emails correspondants |
+| `RATE_LIMIT_PER_SECOND` / `RATE_LIMIT_BURST` | `10` / `20` | débit autorisé par IP sur `/users/**` |
+| `bagbuddy.transaction.status.*` | voir `application.yml` | le vocabulaire des statuts, à garder aligné sur le front |
 
 ---
 
@@ -610,29 +906,34 @@ renseignée : il est rejoué contre le nouveau schéma à chaque base neuve.
   jusqu'au contexte prêt, ce qui compte quand huit JVM démarrent ensemble sur deux
   cœurs ARM. Le build garde aussi un cache Maven d'une fois sur l'autre.
 
-## Réservations, capacité et recherche
+## Comment la capacité tient
 
-La capacité d'une annonce est rattachée aux transactions : chaque acceptation crée
-une réservation (`trip_reservation`) identifiée par la transaction.
+Les règles sont décrites dans [Réservations](#réservations) ; voici comment elles
+sont tenues.
 
-- **Un double-clic sur « accepter » ne décompte le poids qu'une fois** : réserver
-  à nouveau pour la même transaction ne change rien.
-- **Annuler une transaction acceptée ou payée rend son poids** à l'annonce, une
-  fois l'annulation écrite. Si l'appel à `trip-service` échoue, l'annulation reste
-  valide et l'échec est journalisé et compté (voir *Supervision*).
-- **Ce qui tient du poids ne disparaît pas en silence** : une transaction acceptée
-  ou payée doit être annulée avant d'être supprimée, une annonce avec des
-  réservations actives ne se supprime pas, et sa capacité totale ne descend pas
-  sous le poids déjà réservé.
-- **Les demandes jamais payées expirent** : toutes les 15 minutes, les
-  transactions en attente de réponse, refusées ou acceptées sans paiement dont le
-  vol est parti sont annulées (et leur poids rendu). Une transaction payée n'est
-  jamais annulée automatiquement.
+Le poids restant d'une annonce n'est écrit que sous **verrou de ligne**
+(`SELECT … FOR UPDATE`), aussi bien quand une acceptation le décrémente que
+quand le propriétaire modifie son annonce — sans ce second verrou, une
+acceptation validée pendant l'édition était écrasée par la valeur périmée que le
+formulaire renvoyait.
 
-`searchTrips` filtre et trie les annonces réservables côté serveur (trajet, jour
-± tolérance, prix, poids restant) et renvoie aussi le total et les agrégats du
-filtre entier ; les listes (`tripsByUser`, `reviewsByReviewee`…) sont paginées à
-200 éléments au plus.
+Chaque acceptation crée une ligne `trip_reservation` portant un
+`transaction_id` **unique** : c'est elle qui rend la réservation idempotente
+(double-clic sans effet, même transaction avec un autre poids refusée) et la
+restitution rejouable sans risque. La restitution n'est appelée qu'**après** le
+commit de l'annulation : rendue trop tôt, la place pourrait être revendue pour
+une annulation qui, finalement, n'aboutit pas. `TripCapacityConcurrencyTest`
+vérifie tout cela sur un vrai PostgreSQL, avec quatre rejeux concurrents.
+
+L'expiration relit et revérifie chaque transaction sous verrou, une par
+transaction d'écriture : plusieurs instances peuvent faire la passe en même
+temps sans se marcher dessus (au prix d'un travail fait deux fois, qu'un verrou
+partagé type ShedLock supprimerait).
+
+Côté lecture, la pagination passe par un `OffsetPageRequest` qui honore un offset
+arbitraire — `PageRequest` ne connaît que des numéros de page, et `offset=30,
+limit=20` servait donc silencieusement les lignes 20 à 39. Chaque tri se termine
+par `id`, pour que deux dates égales gardent le même ordre d'une page à l'autre.
 
 ## Résilience et abus
 
@@ -696,6 +997,71 @@ Trois scalaires maison complètent les types de base de GraphQL, qui n'en a que
 cinq : `DateTime` (ISO-8601 local), `BigDecimal` (prix et poids, en décimal
 exact — sérialiser un montant en `Float` perdrait de la précision) et `Long`.
 
+### Le catalogue des opérations
+
+La source de vérité reste `<service>/src/main/resources/graphql/schema.graphqls`
+— chaque opération y est commentée. Vue d'ensemble :
+
+**trip-service** — `/trips/graphql`
+
+| Opération | Effet |
+| --- | --- |
+| `trips` · `activeTrips` · `inactiveTrips` | listes d'annonces, paginées (200 max) |
+| `searchTrips(filter, limit, offset)` | recherche filtrée et triée côté serveur, avec totaux et agrégats |
+| `trip(id)` · `tripsByIds(ids)` | une annonce, ou plusieurs dans l'ordre demandé (ids inconnus ignorés) |
+| `tripsByUser(userId)` | les annonces d'un membre |
+| `payoutAccount(userId)` | compte de versement, lisible par son seul propriétaire |
+| `createTrip` · `updateTrip` · `deleteTrip` | publier, modifier, retirer **ses** annonces |
+| `myTripAlerts` · `createTripAlert` · `deleteTripAlert` | alertes email sur les nouvelles annonces |
+
+**transaction-service** — `/transactions/graphql`
+
+| Opération | Effet |
+| --- | --- |
+| `myTransactions` | achats et ventes de l'appelant |
+| `transaction(id)` | réservée aux deux participants |
+| `transactionsBySeller` · `transactionsByBuyer` · `transactionCount` | réservées à l'intéressé lui-même |
+| `totalEarned` · `totalSpent` | sommes des transactions terminées |
+| `transactionMessages(transactionId, afterId)` | le fil de discussion, en lecture incrémentale |
+| `createTransaction` | réserve du poids ; prix calculé côté serveur, contenu déclaré obligatoire |
+| `updateTransaction` | fait avancer la machine à états (statuts, poids, drapeaux d'avis seulement) |
+| `confirmHandover(id, code)` | le voyageur clôt avec le code à six chiffres |
+| `sendTransactionMessage` | écrit dans le fil |
+| `deleteTransaction` | refusé tant que la transaction tient du poids |
+
+**review-service** — `/reviews/graphql`
+
+| Opération | Effet |
+| --- | --- |
+| `reviews` · `review(id)` | lecture, paginée (200 max) |
+| `reviewsByReviewee` · `reviewsByReviewer` · `reviewsByTransaction` | avis reçus, donnés, ou d'une transaction |
+| `averageRating(revieweeId)` | moyenne reçue, `null` tant qu'il n'y a aucun avis |
+| `createReview` · `updateReview` · `deleteReview` | l'auteur vient du jeton, jamais de la requête |
+
+**user-service** — `/users/graphql`
+
+| Opération | Jeton | Effet |
+| --- | --- | --- |
+| `me` | utilisateur | profil de l'appelant, créé à la volée |
+| `user(sub)` | utilisateur | profil public : ni email, ni téléphone, ni compte de paiement |
+| `favoriteListingIds` · `addFavoriteListing` · `removeFavoriteListing` | utilisateur | annonces mises de côté |
+| `updateProfile` | utilisateur | champs libres (bio, ville, téléphone) |
+| `updateIdentity` · `changePassword` | utilisateur | identité Keycloak, mot de passe actuel exigé |
+| `sendVerificationEmail(language)` | utilisateur | renvoie le lien de vérification |
+| `reportMember` | utilisateur | signalement à la modération |
+| `register` | **aucun** | inscription |
+| `requestPasswordReset` · `resetPassword` | **aucun** | mot de passe oublié |
+| `verifyEmail(token)` | **aucun** | valide l'adresse depuis le lien reçu |
+
+**stripe-service** — `/stripe/graphql`
+
+| Opération | Effet |
+| --- | --- |
+| `stripeConfig` | clé publiable, celle que le front passe à Stripe.js |
+| `payoutAccount` | où en est le compte Stripe Connect de l'appelant |
+| `createPaymentIntent(transactionId)` | prépare le paiement ; prend une transaction, jamais un montant |
+| `startPayoutOnboarding` | lien d'onboarding Connect, à usage unique |
+
 ### Ce qui reste volontairement en REST
 
 | Endpoint | Pourquoi |
@@ -717,6 +1083,20 @@ lire, pas le code HTTP.
 | `NOT_FOUND`      | ressource inexistante |
 | `BAD_REQUEST`    | règle métier violée (transition d'état invalide, note hors 1–5, mot de passe trop court…) |
 | `ValidationError`| la requête ne respecte pas le schéma : champ inconnu, type incorrect, argument manquant |
+
+Un refus métier porte en plus un code stable dans `errors[].extensions.code`,
+fait pour que le front affiche le bon message plutôt que d'analyser un texte :
+
+| Code | Quand |
+| --- | --- |
+| `service_unavailable` | un service appelé n'a pas répondu — réessayer a un sens |
+| `content_description_required` · `prohibited_items_not_accepted` | déclaration de contenu manquante à la création d'une réservation |
+| `invalid_handover_code` · `handover_locked` · `handover_not_expected` | code de remise faux, bloqué après 5 essais, ou transaction pas au bon stade |
+| `invalid_message` · `conversation_closed` · `too_many_messages` | messagerie : longueur, transaction annulée, 20 par minute |
+| `invalid_reset_token` · `invalid_verification_token` | lien inconnu, expiré, déjà utilisé, ou envoyé à une adresse que le compte n'a plus |
+| `verification_email_throttled` | moins d'une minute depuis le dernier envoi |
+| `too_many_favorites` · `too_many_reports` · `cannot_report_self` | limites de `userservice` |
+| `too_many_alerts` · `alert_needs_email` · `alert_invalid_route` · `alert_invalid_date` · `alert_invalid_flex` | alertes de trajet |
 
 Le seul code HTTP qui reste porteur de sens est le `401` : sans jeton, la chaîne
 de sécurité rejette la requête avant qu'elle n'atteigne le schéma. Une exception,
@@ -757,7 +1137,15 @@ exigent le rôle realm `service`, porté uniquement par le client confidentiel
 | ------------------------------------------- | -------------------- | -------- |
 | `GET /trips/internal/{id}`                     | transaction-service  | tarifer une réservation contre l'annonce réelle |
 | `POST /trips/internal/{id}/reserve`            | transaction-service  | décrémenter le poids restant sous verrou |
+| `POST /trips/internal/{id}/release`            | transaction-service  | rendre le poids d'une transaction annulée |
 | `POST /transactions/internal/{id}/payment`     | stripe-service       | enregistrer un paiement confirmé par webhook signé |
+| `POST /stripe/internal/refunds`, `/transfers`  | transaction-service  | exécuter le remboursement et le versement décidés par le règlement |
+| `GET`/`PUT /users/internal/{sub}/payout-account` | stripe-service     | lire / enregistrer le compte Stripe Connect d'un membre |
+
+Les deux autres lectures entre services, elles, sont bien en GraphQL — et faites
+**avec le jeton de l'appelant**, justement pour que le service appelé applique sa
+propre règle : `reviewservice` et `stripeservice` lisent une transaction sur
+`/transactions/graphql`, qui refuse déjà de la servir à qui n'y a pas pris part.
 
 À noter pour le front : le poids restant d'une annonce n'est plus à décrémenter
 côté client après une réservation — `transaction-service` s'en charge quand le
@@ -783,13 +1171,24 @@ d'administration ce qu'un navigateur ne peut pas porter :
 
 | Opération (sur `/users/graphql`) | Jeton | Effet |
 | --- | --- | --- |
-| `mutation { register(input: …) }` | aucun | crée le compte Keycloak (email = identifiant) |
-| `mutation { updateIdentity(input: …) }` | utilisateur | prénom, nom, email |
-| `mutation { changePassword(input: …) }` | utilisateur | vérifie l'actuel, puis le remplace |
+| `register(input:)` | aucun | crée le compte Keycloak (email = identifiant, mot de passe permanent) |
+| `requestPasswordReset(input:)` | aucun | envoie un lien `/reset-password#<token>` si l'email correspond à un compte actif ; répond toujours `true` |
+| `resetPassword(input:)` | aucun | pose le mot de passe depuis le lien, le brûle, ferme les sessions du compte |
+| `verifyEmail(token:)` | aucun | marque l'adresse vérifiée, une seule fois |
+| `updateIdentity(input:)` | utilisateur | prénom, nom, email — un nouvel email exige `currentPassword` et repasse en non vérifié |
+| `changePassword(input:)` | utilisateur | revérifie l'actuel auprès de Keycloak, puis le remplace |
+| `sendVerificationEmail(language:)` | utilisateur | renvoie le lien `/verify-email#<token>` (24 h) à l'adresse actuelle |
 
-Les deux dernières agissent sur le `sub` du jeton : aucune ne prend
+Celles qui portent un jeton agissent sur son `sub` : aucune ne prend
 d'identifiant d'utilisateur en argument, pour qu'un bug ne puisse pas devenir la
-modification du compte d'autrui.
+modification du compte d'autrui. Les trois opérations anonymes portent un
+`@PreAuthorize("permitAll()")` explicite, pour qu'une opération **sans**
+annotation se lise toujours comme un oubli.
+
+Les droits d'administration du realm vivent dans un client Keycloak à part,
+`bagbuddy-accounts` (`KEYCLOAK_ACCOUNTS_CLIENT_SECRET`) : le client `bagbuddy`,
+qui sert la tarification et les appels machine-à-machine, n'en porte aucun. Deux
+secrets, deux rayons d'explosion.
 
 L'origine du front est réglée à deux endroits qui doivent rester alignés :
 
