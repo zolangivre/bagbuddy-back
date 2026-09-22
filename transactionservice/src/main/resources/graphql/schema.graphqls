@@ -1,0 +1,168 @@
+# Reservations. Une transaction porte les coordonnees des deux parties : toutes les lectures
+# sont donc reservees aux participants, verifie dans TransactionService.
+
+scalar DateTime
+scalar BigDecimal
+scalar Long
+
+type Query {
+    "Les transactions de l'appelant, achats et ventes confondus, les plus recentes d'abord."
+    myTransactions: [Transaction!]!
+
+    transaction(id: ID!): Transaction!
+
+    "Reserve a l'interesse lui-meme : un vendeur ne lit pas les ventes d'un autre."
+    transactionsBySeller(sellerId: String!): [Transaction!]!
+    transactionsByBuyer(buyerId: String!): [Transaction!]!
+    transactionCount(userId: String!): Long!
+
+    "Somme des transactions terminees des deux cotes."
+    totalEarned(sellerId: String!): Float!
+    totalSpent(buyerId: String!): Float!
+
+    "Fil d'une transaction, du plus ancien au plus recent. afterId : ne rendre que la suite. 200 messages au plus."
+    transactionMessages(transactionId: ID!, afterId: ID): [TransactionMessage!]!
+}
+
+type Mutation {
+    """
+    Cree une reservation. Le prix n'est pas fourni par le client : il est calcule contre
+    l'annonce detenue par tripservice (pricePerKg x weight).
+    """
+    createTransaction(input: CreateTransactionInput!): Transaction!
+
+    """
+    Fait avancer la reservation dans la machine a etats. Seuls les champs de statut, le poids
+    et les drapeaux d'avis sont acceptes ; l'argent et le paiement ne sont jamais ecrits ici.
+    """
+    updateTransaction(id: ID!, input: UpdateTransactionInput!): Transaction!
+
+    deleteTransaction(id: ID!): Boolean!
+
+    """
+    Le voyageur clot la transaction payee avec le code que le destinataire lui donne a la
+    livraison. Codes : invalid_handover_code, handover_locked (5 essais), handover_not_expected.
+    """
+    confirmHandover(id: ID!, code: String!): Transaction!
+
+    "Participants seulement. Codes : invalid_message (1 a 2000 caracteres), conversation_closed, too_many_messages."
+    sendTransactionMessage(transactionId: ID!, body: String!): TransactionMessage!
+}
+
+type TransactionMessage {
+    id: ID!
+    senderSub: String!
+    body: String!
+    createdAt: DateTime!
+    "Vrai si l'appelant en est l'auteur."
+    mine: Boolean!
+}
+
+type Transaction {
+    id: ID!
+    listingId: ID
+    listingInfo: ListingInfo
+    buyerInfo: Party
+    buyerId: String
+    sellerId: String
+
+    "Vocabulaire porte par le front (TRANSACTION_STATUS) ; les transitions, elles, sont ici."
+    sellerStatus: String
+    buyerStatus: String
+    weight: BigDecimal
+
+    "Calcule par le serveur, jamais accepte du client."
+    total: BigDecimal
+    sellerReview: Boolean
+    buyerReview: Boolean
+
+    "Ecrits uniquement par le webhook Stripe signe, via l'endpoint interne."
+    stripePaymentIntentId: String
+    stripeCurrency: String
+    stripeAmount: Long
+    paidAt: DateTime
+    createdAt: DateTime
+
+    "Ce que l'acheteur confie au voyageur, declare a la reservation."
+    contentDescription: String
+    prohibitedItemsAccepted: Boolean!
+
+    "Code de remise. Rendu a l'acheteur seul, a partir du paiement ; nul pour le voyageur."
+    handoverCode: String
+    "Trop de codes faux : seul l'acheteur peut encore clore."
+    handoverLocked: Boolean!
+
+    """
+    Reglement, en unites mineures comme stripeAmount, renseigne quand une transaction payee se
+    termine ou s'annule : refundAmount + platformFee + payoutAmount = stripeAmount.
+    """
+    platformFee: Long
+    refundAmount: Long
+    "PENDING, DONE, SIMULATED (paiement simule en dev) ou FAILED (a traiter a la main). Nul si rien a rembourser."
+    refundStatus: String
+    refundedAt: DateTime
+    payoutAmount: Long
+    "PENDING, AWAITING_ACCOUNT (le voyageur doit configurer ses versements), DONE, SIMULATED ou FAILED."
+    payoutStatus: String
+    paidOutAt: DateTime
+}
+
+"Instantane d'une partie. Visible seulement des participants de la transaction."
+type Party {
+    sub: String
+    name: String
+    givenName: String
+    familyName: String
+    username: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+    email: String
+    phone: String
+}
+
+"Instantane de l'annonce au moment de la reservation. Les dates y sont stockees en texte."
+type ListingInfo {
+    sellerUserInfo: Party
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: String
+    arrivalDate: String
+    totalWeightAvailable: Float!
+    remainingWeight: Float!
+    pricePerKg: Float!
+    conditions: String
+    createdAt: String
+}
+
+input CreateTransactionInput {
+    listingId: ID!
+    weight: BigDecimal!
+
+    "Champs libres du profil acheteur. L'identite vient du jeton."
+    profile: ProfileInput
+
+    "Ce qui sera transporte, 500 caracteres au plus. Code content_description_required."
+    contentDescription: String!
+
+    "Doit valoir true : l'acheteur accepte la liste des objets interdits. Code prohibited_items_not_accepted."
+    prohibitedItemsAccepted: Boolean!
+}
+
+input ProfileInput {
+    bio: String
+    location: String
+    phone: String
+}
+
+input UpdateTransactionInput {
+    sellerStatus: String
+    buyerStatus: String
+
+    "Pris en compte uniquement quand la transition le prevoit ; retarife contre l'annonce."
+    weight: BigDecimal
+
+    "Chaque partie ne pilote que son propre drapeau."
+    sellerReview: Boolean
+    buyerReview: Boolean
+}

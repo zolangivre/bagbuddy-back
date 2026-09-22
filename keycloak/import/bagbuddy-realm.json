@@ -34,8 +34,8 @@
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
   "resetPasswordAllowed": false,
-  "editUsernameAllowed": false,
-  "bruteForceProtected": false,
+  "editUsernameAllowed": true,
+  "bruteForceProtected": true,
   "permanentLockout": false,
   "maxTemporaryLockouts": 0,
   "maxFailureWaitSeconds": 900,
@@ -44,6 +44,7 @@
   "quickLoginCheckMilliSeconds": 1000,
   "maxDeltaTimeSeconds": 43200,
   "failureFactor": 30,
+  "passwordPolicy": "length(8)",
   "roles": {
     "realm": [
       {
@@ -80,6 +81,15 @@
         "id": "d2228604-4502-499f-8ed5-b49642b2b20d",
         "name": "offline_access",
         "description": "${role_offline-access}",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "58b73f2d-f1da-4a40-a0c9-f13925c5ab84",
+        "attributes": {}
+      },
+      {
+        "id": "a7c5a360-a2e8-4084-8fe2-7f8932850d34",
+        "name": "service",
+        "description": "Machine-to-machine role for internal service endpoints",
         "composite": false,
         "clientRole": false,
         "containerId": "58b73f2d-f1da-4a40-a0c9-f13925c5ab84",
@@ -458,6 +468,27 @@
   "webAuthnPolicyPasswordlessExtraOrigins": [],
   "users": [
     {
+      "username": "service-account-bagbuddy-accounts",
+      "enabled": true,
+      "totp": false,
+      "emailVerified": false,
+      "serviceAccountClientId": "bagbuddy-accounts",
+      "credentials": [],
+      "disableableCredentialTypes": [],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "clientRoles": {
+        "realm-management": [
+          "manage-users",
+          "view-users"
+        ]
+      },
+      "notBefore": 0,
+      "groups": []
+    },
+    {
       "id": "00bd656f-9249-4bfb-896f-0c457ce5149e",
       "username": "service-account-bagbuddy",
       "emailVerified": false,
@@ -469,40 +500,10 @@
       "disableableCredentialTypes": [],
       "requiredActions": [],
       "realmRoles": [
-        "default-roles-bagbuddy"
+        "default-roles-bagbuddy",
+        "service"
       ],
-      "clientRoles": {
-        "realm-management": [
-          "realm-admin"
-        ]
-      },
-      "notBefore": 0,
-      "groups": []
-    },
-    {
-      "id": "7d4c04f1-cc5b-43ff-a10b-ff627b55f233",
-      "username": "testuser",
-      "firstName": "Test",
-      "lastName": "User",
-      "email": "testuser@bagbuddy.local",
-      "emailVerified": true,
-      "createdTimestamp": 1783956249955,
-      "enabled": true,
-      "totp": false,
-      "credentials": [
-        {
-          "id": "91f690a1-1b12-42f0-ac3c-34028622974e",
-          "type": "password",
-          "createdDate": 1783956249986,
-          "secretData": "{\"value\":\"TafpB+uviQJrJLyP5pQSC+HHY4ghhSzfGLuoKyuqT/Q=\",\"salt\":\"/AqzN29Msz7oAaf7mqvKeQ==\",\"additionalParameters\":{}}",
-          "credentialData": "{\"hashIterations\":5,\"algorithm\":\"argon2\",\"additionalParameters\":{\"hashLength\":[\"32\"],\"memory\":[\"7168\"],\"type\":[\"id\"],\"version\":[\"1.3\"],\"parallelism\":[\"1\"]}}"
-        }
-      ],
-      "disableableCredentialTypes": [],
-      "requiredActions": [],
-      "realmRoles": [
-        "default-roles-bagbuddy"
-      ],
+      "clientRoles": {},
       "notBefore": 0,
       "groups": []
     }
@@ -676,7 +677,7 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "46144xbKPUiHAlyIJrOC4PoLPyRUJpgR",
+      "secret": "${KEYCLOAK_SERVICE_CLIENT_SECRET}",
       "redirectUris": [],
       "webOrigins": [],
       "notBefore": 0,
@@ -745,6 +746,20 @@
             "claim.name": "clientAddress",
             "jsonType.label": "String"
           }
+        },
+        {
+          "id": "d44635b8-edc6-412b-80f6-126f11b9017a",
+          "name": "bagbuddy-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "bagbuddy-api",
+            "introspection.token.claim": "true",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true"
+          }
         }
       ],
       "defaultClientScopes": [
@@ -760,7 +775,8 @@
         "phone",
         "offline_access",
         "microprofile-jwt"
-      ]
+      ],
+      "description": "Service account used for internal service-to-service calls (Stripe webhook -> transactionservice)"
     },
     {
       "id": "335bbf30-2de2-43e3-a97c-d18a84ad6327",
@@ -771,12 +787,9 @@
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
         "bagbuddy://redirect",
-        "bagbuddy://redirect/*",
-        "*"
+        "bagbuddy://redirect/*"
       ],
-      "webOrigins": [
-        "*"
-      ],
+      "webOrigins": [],
       "notBefore": 0,
       "bearerOnly": false,
       "consentRequired": false,
@@ -789,8 +802,68 @@
       "protocol": "openid-connect",
       "attributes": {
         "backchannel.logout.session.required": "true",
-        "post.logout.redirect.uris": "*",
+        "post.logout.redirect.uris": "bagbuddy://redirect",
         "pkce.code.challenge.method": "S256",
+        "backchannel.logout.revoke.offline.tokens": "false"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "fullScopeAllowed": true,
+      "nodeReRegistrationTimeout": -1,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "basic",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "id": "cb26b6ee-de4f-47b8-b672-f10587137509",
+          "name": "bagbuddy-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "bagbuddy-api",
+            "introspection.token.claim": "true",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "bagbuddy-accounts",
+      "name": "BagBuddy Accounts",
+      "description": "Client de service de userservice pour l API d administration Keycloak : creation de compte, identite, mot de passe. Secret distinct de `bagbuddy` pour que les droits manage-users ne soient pas portes par le client de tarification.",
+      "surrogateAuthRequired": false,
+      "enabled": true,
+      "alwaysDisplayInConsole": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}",
+      "redirectUris": [],
+      "webOrigins": [],
+      "notBefore": 0,
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "frontchannelLogout": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "backchannel.logout.session.required": "true",
+        "post.logout.redirect.uris": "+",
         "backchannel.logout.revoke.offline.tokens": "false"
       },
       "authenticationFlowBindingOverrides": {},
@@ -819,24 +892,24 @@
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
       "redirectUris": [
-        "http://localhost:4200/*"
+        "${BAGBUDDY_FRONT_URL}/*"
       ],
       "webOrigins": [
-        "http://localhost:4200"
+        "${BAGBUDDY_FRONT_URL}"
       ],
       "notBefore": 0,
       "bearerOnly": false,
       "consentRequired": false,
-      "standardFlowEnabled": true,
+      "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": false,
       "publicClient": true,
       "frontchannelLogout": false,
       "protocol": "openid-connect",
       "attributes": {
         "backchannel.logout.session.required": "true",
-        "post.logout.redirect.uris": "http://localhost:4200/*",
+        "post.logout.redirect.uris": "${BAGBUDDY_FRONT_URL}/*",
         "pkce.code.challenge.method": "S256",
         "backchannel.logout.revoke.offline.tokens": "false"
       },
@@ -859,8 +932,24 @@
       ],
       "name": "BagBuddy Web",
       "description": "Client public (PKCE) pour l app web Angular",
-      "rootUrl": "http://localhost:4200",
-      "baseUrl": "/"
+      "rootUrl": "${BAGBUDDY_FRONT_URL}",
+      "baseUrl": "/",
+      "protocolMappers": [
+        {
+          "id": "c354aa55-2bfc-4f27-a37d-c230f663bd58",
+          "name": "bagbuddy-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "bagbuddy-api",
+            "introspection.token.claim": "true",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "id": "6be37b83-d11b-4414-9b15-c23c4f3374ef",

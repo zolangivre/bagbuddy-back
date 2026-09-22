@@ -1,0 +1,106 @@
+# Integration continue du backend : chaque service est un projet Maven independant, teste
+# separement. Les runners ubuntu ont Docker, donc les tests Testcontainers (vraies migrations
+# Flyway, verrous FOR UPDATE) tournent ici au lieu d'etre ignores.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - eurekaserver
+          - apigateway
+          - tripservice
+          - transactionservice
+          - reviewservice
+          - stripeservice
+          - userservice
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: ${{ matrix.service }}/pom.xml
+
+      - name: Test
+        run: ./mvnw -B -ntp verify
+
+      - name: Rapports de test
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-${{ matrix.service }}
+          path: ${{ matrix.service }}/target/surefire-reports
+          retention-days: 7
+
+  compose:
+    name: compose files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker-compose.prod.yml exige chaque secret (${VAR:?}) : un fichier d'exemple aux
+      # valeurs factices suffit a verifier que les deux fichiers restent valides.
+      - name: Valider docker-compose.dev.yml et docker-compose.prod.yml
+        run: |
+          sed -E 's/^([A-Z0-9_]+)=$/\1=ci-placeholder/' .env.prod.example > "$RUNNER_TEMP/ci.env"
+          cp .env.example .env
+          docker compose -f docker-compose.dev.yml config --quiet
+          docker compose -f docker-compose.prod.yml --env-file "$RUNNER_TEMP/ci.env" config --quiet
+
+  images:
+    name: image (${{ matrix.service }})
+    # Construire les images coute cher : seulement sur les branches principales, pas sur chaque PR.
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - eurekaserver
+          - apigateway
+          - tripservice
+          - transactionservice
+          - reviewservice
+          - stripeservice
+          - userservice
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Construite en natif (amd64) et non pour l'ARM de la VM : sous emulation QEMU, le build
+      # Maven et l'entrainement CDS prendraient une demi-heure par image. Ce qui est verifie ici
+      # -- le Dockerfile, le build, le demarrage d'entrainement CDS -- ne depend pas de l'architecture.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

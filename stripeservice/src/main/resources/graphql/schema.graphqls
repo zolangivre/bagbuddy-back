@@ -1,0 +1,50 @@
+# Paiements. Le webhook Stripe reste volontairement en REST (POST /stripe/webhook) : c'est
+# Stripe qui appelle, authentifie par la signature du payload et non par un jeton porteur.
+
+type Query {
+    "Cle publiable, celle que le front passe a Stripe.js. Rien de secret ici."
+    stripeConfig: StripeConfig!
+
+    "Ou en est le compte de versement (Stripe Connect) de l'appelant."
+    payoutAccount: PayoutAccountStatus!
+}
+
+type Mutation {
+    """
+    Prepare le paiement d'une transaction. Prend l'identifiant de la transaction et non un
+    montant : la somme est derivee du total stocke, lui-meme tarife contre l'annonce. Seul
+    l'acheteur de la transaction peut la declencher.
+    """
+    createPaymentIntent(transactionId: ID!): PaymentIntent!
+
+    """
+    Lien d'onboarding Stripe Connect de l'appelant, pour recevoir les versements de ses trajets.
+    Le compte est cree au premier appel ; les suivants reprennent la ou le membre s'est arrete.
+    Le lien est a usage unique et expire vite : a ouvrir aussitot, jamais a stocker.
+    """
+    startPayoutOnboarding: PayoutOnboarding!
+}
+
+type PayoutAccountStatus {
+    "Un compte Connect existe pour ce membre."
+    connected: Boolean!
+    "Le membre a rempli le formulaire Stripe."
+    detailsSubmitted: Boolean!
+    "Stripe verse vers sa banque."
+    payoutsEnabled: Boolean!
+    "La plateforme peut lui transferer des fonds : c'est ce qui debloque ses versements en attente."
+    transfersActive: Boolean!
+}
+
+type PayoutOnboarding {
+    url: String!
+}
+
+type StripeConfig {
+    publishableKey: String!
+}
+
+type PaymentIntent {
+    "A remettre a Stripe.js cote navigateur pour confirmer le paiement."
+    clientSecret: String!
+}

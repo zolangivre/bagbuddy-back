@@ -2,14 +2,55 @@ spring:
   application:
     name: trip-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
+  # --- GraphQL ---
+  # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
+  # de chemin (Path=/trips/**) sans reecriture, et un appel direct au conteneur emprunte
+  # exactement la meme URL. Une seule route, un seul POST : c'est le contrat GraphQL.
+  graphql:
+    http:
+      path: /trips/graphql
+    graphiql:
+      # Console de developpement, coupee par defaut. GRAPHIQL_ENABLED=true en local.
+      enabled: ${GRAPHIQL_ENABLED:false}
+      path: /trips/graphiql
+
   datasource:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Un seul Postgres pour tous les services en prod (max_connections=100 par defaut) et
+      # Keycloak a cote : 10 connexions par service par defaut, c'etait deja la moitie du budget
+      # sans compter les redemarrages. Avec des threads virtuels, les requetes attendent une
+      # connexion libre au lieu de monopoliser un thread : 5 suffisent a ce volume.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:5}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
+      # Plus court que les 30 s par defaut : une base saturee doit remonter vite en erreur.
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT:5000}
+
+  flyway:
+    # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
+    # d'historique Flyway : on les marque au niveau V1 (deja en place) au lieu
+    # d'echouer, et seules les migrations suivantes leur sont appliquees.
+    baseline-on-migrate: true
+    baseline-version: 1
 
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      # Le schema appartient a Flyway. 'validate' echoue au demarrage si les
+      # entites et les migrations ont diverge -- c'est le but : mieux vaut ne pas
+      # demarrer que decouvrir la divergence sur une requete en production.
+      ddl-auto: validate
+    show-sql: false
+    # Une requete HTTP ne doit pas retenir une connexion DB pendant la serialisation GraphQL.
+    open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -17,20 +58,89 @@ spring:
 server:
   port: ${PORT:8082}
 
-#eureka:
-#  instance:
-#    hostname: tripservice-app-180bcd8fc60e.herokuapp.com
-#    prefer-ip-address: false
-#    non-secure-port: 80
-#    non-secure-port-enabled: true
-#    secure-port-enabled: false
-#  client:
-#    register-with-eureka: true
-#    fetch-registry: true
-#    service-url:
-#      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+# --- Service discovery (Eureka) ---
+# Le service s'enregistre sous son spring.application.name : c'est ce nom que
+# l'apigateway resout (lb://trip-service). Le port annonce est deduit de
+# server.port, il n'y a donc rien a coder en dur ici.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka/}
+    # Cadence dev : un service redemarre doit redevenir routable en quelques
+    # secondes, pas au bout d'une minute et demie.
+    registry-fetch-interval-seconds: 5
+  instance:
+    # En Docker, le nom d'hote d'un conteneur n'est resolvable que depuis le
+    # reseau compose ; son IP l'est toujours.
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
 
 logging:
   level:
-    org.hibernate.SQL: debug
+    # Trace SQL a la demande : SQL_LOG_LEVEL=debug en local si besoin.
+    org.hibernate.SQL: ${SQL_LOG_LEVEL:warn}
     org.springframework: info
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  # --- Alertes de trajet ---
+  alerts:
+    enabled: ${ALERTS_ENABLED:true}
+    max-per-member: ${ALERTS_MAX_PER_MEMBER:10}
+    from: ${MAIL_FROM:BagBuddy <no-reply@bagbuddy.local>}
+    # Les liens ouvrent l'annonce sur le front web.
+    front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
+
+# En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
+spring.mail:
+  host: ${SMTP_HOST:localhost}
+  port: ${SMTP_PORT:1025}
+  username: ${SMTP_USERNAME:}
+  password: ${SMTP_PASSWORD:}
+  properties:
+    mail.smtp.auth: ${SMTP_AUTH:false}
+    mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+    mail.smtp.connectiontimeout: 5000
+    mail.smtp.timeout: 5000
+    mail.smtp.writetimeout: 5000

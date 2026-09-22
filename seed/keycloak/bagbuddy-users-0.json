@@ -1,0 +1,131 @@
+{
+  "realm": "bagbuddy",
+  "users": [
+    {
+      "id": "5eed0000-0000-4000-8000-000000000001",
+      "username": "camille.martin@bagbuddy.local",
+      "firstName": "Camille",
+      "lastName": "Martin",
+      "email": "camille.martin@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    },
+    {
+      "id": "5eed0000-0000-4000-8000-000000000002",
+      "username": "moussa.diop@bagbuddy.local",
+      "firstName": "Moussa",
+      "lastName": "Diop",
+      "email": "moussa.diop@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    },
+    {
+      "id": "5eed0000-0000-4000-8000-000000000003",
+      "username": "lea.fontaine@bagbuddy.local",
+      "firstName": "Léa",
+      "lastName": "Fontaine",
+      "email": "lea.fontaine@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    },
+    {
+      "id": "5eed0000-0000-4000-8000-000000000004",
+      "username": "hugo.tremblay@bagbuddy.local",
+      "firstName": "Hugo",
+      "lastName": "Tremblay",
+      "email": "hugo.tremblay@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    },
+    {
+      "id": "5eed0000-0000-4000-8000-000000000005",
+      "username": "ines.benali@bagbuddy.local",
+      "firstName": "Inès",
+      "lastName": "Benali",
+      "email": "ines.benali@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    },
+    {
+      "id": "7d4c04f1-cc5b-43ff-a10b-ff627b55f233",
+      "username": "testuser",
+      "firstName": "Test",
+      "lastName": "User",
+      "email": "testuser@bagbuddy.local",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Test1234!",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-bagbuddy"
+      ],
+      "groups": []
+    }
+  ]
+}

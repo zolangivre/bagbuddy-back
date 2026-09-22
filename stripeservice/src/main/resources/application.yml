@@ -1,29 +1,150 @@
 spring:
   application:
     name: stripe-service
+
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
+  # --- GraphQL ---
+  # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
+  # de chemin (Path=/stripe/**) sans reecriture, et un appel direct au conteneur emprunte
+  # exactement la meme URL. Une seule route, un seul POST : c'est le contrat GraphQL.
+  graphql:
+    http:
+      path: /stripe/graphql
+    graphiql:
+      # Console de developpement, coupee par defaut. GRAPHIQL_ENABLED=true en local.
+      enabled: ${GRAPHIQL_ENABLED:false}
+      path: /stripe/graphiql
+
 server:
-  port: ${PORT}
-#eureka:
-#  instance:
-#    hostname: stripeservice-app-e0349536e242.herokuapp.com
-#    prefer-ip-address: false
-#    non-secure-port: 80
-#    non-secure-port-enabled: true
-#    secure-port-enabled: false
-#  client:
-#    register-with-eureka: true
-#    fetch-registry: true
-#    service-url:
-#      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+  port: ${PORT:8085}
+# --- Service discovery (Eureka) ---
+# Le service s'enregistre sous son spring.application.name : c'est ce nom que
+# l'apigateway resout (lb://stripe-service). Le port annonce est deduit de
+# server.port, il n'y a donc rien a coder en dur ici.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka/}
+    # Cadence dev : un service redemarre doit redevenir routable en quelques
+    # secondes, pas au bout d'une minute et demie.
+    registry-fetch-interval-seconds: 5
+  instance:
+    # En Docker, le nom d'hote d'un conteneur n'est resolvable que depuis le
+    # reseau compose ; son IP l'est toujours.
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
 
 management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
 
 logging:
   level:
     "[com.netflix.eureka]": ERROR
     "[com.netflix.discovery]": ERROR
     root: INFO
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+# --- Appels service-a-service (webhook Stripe -> transactionservice) ---
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-service:
+      provider: keycloak
+      client-id: ${KEYCLOAK_SERVICE_CLIENT_ID:bagbuddy}
+      client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
+
+bagbuddy.service-client.registration-id: bagbuddy-service
+bagbuddy.transaction-service.url: ${TRANSACTION_SERVICE_URL:http://localhost:8083}
+bagbuddy.stripe.currency: ${STRIPE_CURRENCY:eur}
+# Le compte Connect d'un voyageur est enregistre dans son profil userservice.
+bagbuddy.user-service.url: ${USER_SERVICE_URL:http://localhost:8086}
+# Stripe Connect Express : pays des comptes crees, et retour sur le front apres l'onboarding.
+bagbuddy.stripe.connect.country: ${STRIPE_CONNECT_COUNTRY:FR}
+# Routes du front : changer celles-ci suppose de changer le front en face.
+bagbuddy.stripe.connect.return-path: ${STRIPE_CONNECT_RETURN_PATH:/account?payouts=done}
+bagbuddy.stripe.connect.refresh-path: ${STRIPE_CONNECT_REFRESH_PATH:/account?payouts=retry}
+bagbuddy.front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
+
+# --- Appels sortants ---
+# Delais courts et explicites : sans eux, un service muet fait patienter le
+# client jusqu'au timeout par defaut de la couche HTTP.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      userservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException
+      transactionservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un 404 ou un refus d'acces sont des reponses, pas des pannes : les
+        # compter ouvrirait le circuit parce que des clients demandent des
+        # choses qui n'existent pas.
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException

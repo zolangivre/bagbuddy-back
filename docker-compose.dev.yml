@@ -5,8 +5,55 @@ services:
       context: ./eurekaserver
       dockerfile: Dockerfile
     container_name: eureka-server
+    environment:
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
     ports:
       - "8761:8761"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8761/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      - bagbuddy-network
+
+  # --- TRACING ---
+  # Collecte les traces des services. Aucune persistance : en memoire, ce qui
+  # convient au dev et perd tout au redemarrage.
+  zipkin:
+    image: openzipkin/zipkin:3.4
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - bagbuddy-network
+
+  # --- EMAILS ---
+  # Faux serveur SMTP : userservice (mot de passe oublie, verification, moderation),
+  # transactionservice (notifications) et tripservice (alertes) y envoient leurs emails, qui ne partent nulle part et se lisent sur
+  # http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27
+    container_name: mailpit
+    ports:
+      - "8025:8025"
+    networks:
+      - bagbuddy-network
+
+  # --- RATE LIMITING ---
+  # Compteurs du RequestRateLimiter du gateway. Sans persistance : les quotas
+  # repartent de zero a chaque redemarrage, ce qui convient au dev.
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - bagbuddy-network
 
@@ -18,15 +65,22 @@ services:
     container_name: api-gateway-dev
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
+      eureka-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: always
     environment:
       - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
-      - TRIP_SERVICE_URL=http://trip-service:8082
-      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
-      - REVIEW_SERVICE_URL=http://review-service:8084
-      - STRIPE_SERVICE_URL=http://stripe-service:8085
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - REDIS_HOST=redis
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:4200}
     networks:
       - bagbuddy-network
@@ -44,10 +98,20 @@ services:
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Substitues dans bagbuddy-realm.json a l'import du realm : les secrets des
+      # clients confidentiels ne figurent pas dans le depot, et l'URL du front est
+      # la seule difference de realm entre le dev et la prod.
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      KEYCLOAK_ACCOUNTS_CLIENT_SECRET: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      BAGBUDDY_FRONT_URL: ${BAGBUDDY_FRONT_URL:-http://localhost:4200}
     ports:
       - "8000:8080"
     volumes:
-      - ./keycloak/import:/opt/keycloak/data/import
+      # Le realm est commun au dev et a la prod ; les comptes de demo, eux, ne sont
+      # montes qu'ici. Keycloak importe bagbuddy-users-*.json juste apres le realm,
+      # et seulement quand le realm n'existe pas encore (base Keycloak neuve).
+      - ./keycloak/import/bagbuddy-realm.json:/opt/keycloak/data/import/bagbuddy-realm.json:ro
+      - ./seed/keycloak/bagbuddy-users-0.json:/opt/keycloak/data/import/bagbuddy-users-0.json:ro
     depends_on:
       - keycloak-db
     networks:
@@ -63,50 +127,86 @@ services:
       POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
     volumes:
       - keycloak_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KEYCLOAK_DB_USER} -d ${KEYCLOAK_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - 5435:5432
     networks:
       - bagbuddy-network
 
   # --- USER SERVICE ---
-#  user-service:
-#    build:
-#      context: ./userservice
-#      dockerfile: Dockerfile
-#    container_name: user-service-dev
-#    env_file:
-#      - ./.env
-#    ports:
-#      - "8085:8085"
-#    depends_on:
-#      - eureka-server
-#      - keycloak
-#      - userservice-db
-#    environment:
-#      - SPRING_DATASOURCE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}
-#      - SPRING_DATASOURCE_USERNAME=${USER_SERVICE_USER}
-#      - SPRING_DATASOURCE_PASSWORD=${USER_SERVICE_PASSWORD}
-#      - KEYCLOAK_AUTH_SERVER_URL=http://keycloak:8080
-#      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-bagbuddy}
-#      - KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN}
-#      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
-#      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
-#    networks:
-#      - bagbuddy-network
-#
-#  userservice-db:
-#    image: postgres:15-alpine
-#    container_name: user-service-postgres
-#    environment:
-#      POSTGRES_DB: ${USER_SERVICE_DB}
-#      POSTGRES_USER: ${USER_SERVICE_USER}
-#      POSTGRES_PASSWORD: ${USER_SERVICE_PASSWORD}
-#    volumes:
-#      - user_pgdata:/var/lib/postgresql/data
-#    ports:
-#      - ${USER_SERVICE_DB_PORT}:5432
-#    networks:
-#      - bagbuddy-network
+  # Profils applicatifs (bio, localisation, telephone, compte Stripe) et cycle de vie des
+  # comptes : le front sert ses propres ecrans d'inscription et de compte, donc ce service
+  # relaie les operations que le navigateur ne peut pas porter (creation d'utilisateur,
+  # changement d'email, mot de passe) vers l'API d'administration de Keycloak.
+  user-service:
+    build:
+      context: ./userservice
+      dockerfile: Dockerfile
+    container_name: user-service-dev
+    environment:
+      - PORT=8086
+      - DATABASE_URL=jdbc:postgresql://userservice-db:5432/${USER_SERVICE_DB}?user=${USER_SERVICE_USER}&password=${USER_SERVICE_PASSWORD}
+      # Donnees de demo : seed/userservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - KEYCLOAK_BASE_URL=http://keycloak:8080
+      - KEYCLOAK_REALM=bagbuddy
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_ACCOUNTS_CLIENT_ID=bagbuddy-accounts
+      - KEYCLOAK_ACCOUNTS_CLIENT_SECRET=${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      - KEYCLOAK_LOGIN_CLIENT_ID=bagbuddy-web
+      # Emails de compte : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+    volumes:
+      - ./seed/userservice:/seed:ro
+    ports:
+      - "8086:8086"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      keycloak:
+        condition: service_started
+      userservice-db:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - bagbuddy-network
+
+  userservice-db:
+    image: postgres:15-alpine
+    container_name: user-service-postgres
+    environment:
+      POSTGRES_DB: ${USER_SERVICE_DB}
+      POSTGRES_USER: ${USER_SERVICE_USER}
+      POSTGRES_PASSWORD: ${USER_SERVICE_PASSWORD}
+    volumes:
+      - user_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${USER_SERVICE_USER} -d ${USER_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - ${USER_SERVICE_DB_PORT}:5432
+    networks:
+      - bagbuddy-network
 
   # --- TRIP SERVICE ---
   trip-service:
@@ -114,16 +214,39 @@ services:
       context: ./tripservice
       dockerfile: Dockerfile
     container_name: trip-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8082
       - DATABASE_URL=jdbc:postgresql://tripservice-db:5432/${TRIP_SERVICE_DB}?user=${TRIP_SERVICE_USER}&password=${TRIP_SERVICE_PASSWORD}
+      # Donnees de demo : seed/tripservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      # Alertes de trajet : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+    volumes:
+      - ./seed/tripservice:/seed:ro
     ports:
       - "8082:8082"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - tripservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      tripservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -136,6 +259,11 @@ services:
       POSTGRES_PASSWORD: ${TRIP_SERVICE_PASSWORD}
     volumes:
       - trip_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRIP_SERVICE_USER} -d ${TRIP_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${TRIP_SERVICE_DB_PORT}:5432
     networks:
@@ -147,16 +275,48 @@ services:
       context: ./transactionservice
       dockerfile: Dockerfile
     container_name: transaction-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8083
       - DATABASE_URL=jdbc:postgresql://transactionservice-db:5432/${TRANSACTION_SERVICE_DB}?user=${TRANSACTION_SERVICE_USER}&password=${TRANSACTION_SERVICE_PASSWORD}
+      # Donnees de demo : seed/transactionservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
+      - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      - TRIP_SERVICE_URL=http://trip-service:8082
+      # Remboursements et versements, executes par stripe-service.
+      - STRIPE_SERVICE_URL=http://stripe-service:8085
+      # Notifications email des transitions : liens vers le front, remis a Mailpit.
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+      - SMTP_HOST=mailpit
+      - SMTP_PORT=1025
+      # true (defaut) : une transaction ne passe "confirmed" qu'apres le webhook Stripe
+      # signe. false dans .env pour simuler le paiement sans cles Stripe.
+      - PAYMENTS_REQUIRE_STRIPE=${PAYMENTS_REQUIRE_STRIPE:-true}
+    volumes:
+      - ./seed/transactionservice:/seed:ro
     ports:
       - "8083:8083"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - transactionservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      transactionservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -169,6 +329,11 @@ services:
       POSTGRES_PASSWORD: ${TRANSACTION_SERVICE_PASSWORD}
     volumes:
       - transaction_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRANSACTION_SERVICE_USER} -d ${TRANSACTION_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${TRANSACTION_SERVICE_DB_PORT}:5432
     networks:
@@ -180,16 +345,36 @@ services:
       context: ./reviewservice
       dockerfile: Dockerfile
     container_name: review-service-dev
-    env_file:
-      - ./.env
     environment:
       - PORT=8084
       - DATABASE_URL=jdbc:postgresql://reviewservice-db:5432/${REVIEW_SERVICE_DB}?user=${REVIEW_SERVICE_USER}&password=${REVIEW_SERVICE_PASSWORD}
+      # Donnees de demo : seed/reviewservice/afterMigrate.sql, joue par Flyway sur une base vide.
+      - SPRING_FLYWAY_LOCATIONS=classpath:db/migration,filesystem:/seed
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
+    volumes:
+      - ./seed/reviewservice:/seed:ro
     ports:
       - "8084:8084"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - eureka-server
-      - reviewservice-db
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      reviewservice-db:
+        condition: service_healthy
     networks:
       - bagbuddy-network
 
@@ -202,29 +387,106 @@ services:
       POSTGRES_PASSWORD: ${REVIEW_SERVICE_PASSWORD}
     volumes:
       - review_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${REVIEW_SERVICE_USER} -d ${REVIEW_SERVICE_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
       - ${REVIEW_SERVICE_DB_PORT}:5432
     networks:
       - bagbuddy-network
 
-  # Disabled for local dev: requires STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY
-  # stripe-service:
-  #   build:
-  #     context: ./stripeservice
-  #     dockerfile: Dockerfile
-  #   container_name: stripe-service-dev
-  #   env_file:
-  #     - ./.env
-  #   ports:
-  #     - "8085:8085"
-  #   depends_on:
-  #     - eureka-server
-  #   environment:
-  #     PORT: 8085
-  #     STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-  #     STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
-  #   networks:
-  #     - bagbuddy-network
+  # --- STRIPE SERVICE ---
+  # Refuse de demarrer tant que STRIPE_SECRET_KEY est vide : renseigne les cles de test
+  # (dashboard Stripe > Developpeurs > Cles API) dans .env. Les autres services n'en
+  # dependent pas, la stack reste utilisable sans.
+  stripe-service:
+    build:
+      context: ./stripeservice
+      dockerfile: Dockerfile
+    container_name: stripe-service-dev
+    environment:
+      - PORT=8085
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - JWT_ISSUER_URIS=http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy
+      - JWT_JWK_SET_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/certs
+      - JWT_AUDIENCE=bagbuddy-api
+      # Console GraphiQL, pratique en dev : /<prefixe>/graphiql
+      - GRAPHIQL_ENABLED=true
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - ZIPKIN_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - KEYCLOAK_TOKEN_URI=http://keycloak:8080/realms/bagbuddy/protocol/openid-connect/token
+      - KEYCLOAK_SERVICE_CLIENT_ID=bagbuddy
+      - KEYCLOAK_SERVICE_CLIENT_SECRET=${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      - TRANSACTION_SERVICE_URL=http://transaction-service:8083
+      # Stripe Connect : le compte de versement vit dans le profil userservice, et Stripe
+      # renvoie le membre sur le front a la fin de l'onboarding.
+      - USER_SERVICE_URL=http://user-service:8086
+      - BAGBUDDY_FRONT_URL=${BAGBUDDY_FRONT_URL:-http://localhost:4200}
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8085/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - bagbuddy-network
+
+  # Relaie les webhooks Stripe (mode test) vers la gateway locale, que Stripe ne peut
+  # pas joindre directement. Optionnel : docker compose ... --profile stripe-webhooks up -d
+  # Le secret de signature qu'il utilise s'obtient avec la commande indiquee dans le
+  # README et va dans STRIPE_WEBHOOK_SECRET.
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    container_name: stripe-cli
+    profiles: ["stripe-webhooks"]
+    command: listen --forward-to http://api-gateway:8080/stripe/webhook --events payment_intent.succeeded
+    environment:
+      - STRIPE_API_KEY=${STRIPE_SECRET_KEY:-}
+    depends_on:
+      - api-gateway
+    networks:
+      - bagbuddy-network
+
+  # Metriques de toute la stack : meme configuration de scrape qu'en production (les noms de
+  # service sont les memes). Optionnel : docker compose ... --profile monitoring up -d
+  # Prometheus sur http://localhost:9090, Grafana sur http://localhost:3000 (admin / admin).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks:
+      - bagbuddy-network
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: grafana
+    profiles: ["monitoring"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - bagbuddy-network
 
 # --- VOLUMES & NETWORK ---
 volumes:

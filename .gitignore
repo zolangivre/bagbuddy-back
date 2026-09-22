@@ -22,6 +22,12 @@ target/
 .env.*
 .env
 !.env.example
+!.env.prod.example
+
+### Deploiement ###
+# Plan de deploiement personnel et sauvegardes de la base de prod : jamais dans le depot.
+PLAN-DEPLOIEMENT.md
+backups/
 
 ### NetBeans ###
 /nbproject/private/

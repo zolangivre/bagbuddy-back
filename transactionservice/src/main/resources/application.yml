@@ -2,35 +2,226 @@ spring:
   application:
     name: transaction-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
+  # --- GraphQL ---
+  # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
+  # de chemin (Path=/transactions/**) sans reecriture, et un appel direct au conteneur emprunte
+  # exactement la meme URL. Une seule route, un seul POST : c'est le contrat GraphQL.
+  graphql:
+    http:
+      path: /transactions/graphql
+    graphiql:
+      # Console de developpement, coupee par defaut. GRAPHIQL_ENABLED=true en local.
+      enabled: ${GRAPHIQL_ENABLED:false}
+      path: /transactions/graphiql
+
   datasource:
     url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Un seul Postgres pour tous les services en prod (max_connections=100 par defaut) et
+      # Keycloak a cote : 10 connexions par service par defaut, c'etait deja la moitie du budget
+      # sans compter les redemarrages. Avec des threads virtuels, les requetes attendent une
+      # connexion libre au lieu de monopoliser un thread : 5 suffisent a ce volume.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:5}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
+      # Plus court que les 30 s par defaut : une base saturee doit remonter vite en erreur.
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT:5000}
+
+  flyway:
+    # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
+    # d'historique Flyway : on les marque au niveau V1 (deja en place) au lieu
+    # d'echouer, et seules les migrations suivantes leur sont appliquees.
+    baseline-on-migrate: true
+    baseline-version: 1
 
   jpa:
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      # Le schema appartient a Flyway. 'validate' echoue au demarrage si les
+      # entites et les migrations ont diverge -- c'est le but : mieux vaut ne pas
+      # demarrer que decouvrir la divergence sur une requete en production.
+      ddl-auto: validate
+    show-sql: false
+    # Une requete HTTP ne doit pas retenir une connexion DB pendant la serialisation GraphQL.
+    open-in-view: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 server:
-  port: ${PORT:8082}
+  port: ${PORT:8083}
 
-#eureka:
-#  instance:
-#    hostname: transactionservice-app-8f23a0c4e4b5.herokuapp.com
-#    prefer-ip-address: false
-#    non-secure-port: 80
-#    non-secure-port-enabled: true
-#    secure-port-enabled: false
-#  client:
-#    register-with-eureka: true
-#    fetch-registry: true
-#    service-url:
-#      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+# --- Service discovery (Eureka) ---
+# Le service s'enregistre sous son spring.application.name : c'est ce nom que
+# l'apigateway resout (lb://transaction-service). Le port annonce est deduit de
+# server.port, il n'y a donc rien a coder en dur ici.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka/}
+    # Cadence dev : un service redemarre doit redevenir routable en quelques
+    # secondes, pas au bout d'une minute et demie.
+    registry-fetch-interval-seconds: 5
+  instance:
+    # En Docker, le nom d'hote d'un conteneur n'est resolvable que depuis le
+    # reseau compose ; son IP l'est toujours.
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
 
 logging:
   level:
-    org.hibernate.SQL: debug
+    # Trace SQL a la demande : SQL_LOG_LEVEL=debug en local si besoin.
+    org.hibernate.SQL: ${SQL_LOG_LEVEL:warn}
     org.springframework: info
+
+# --- Authentification (Keycloak) ---
+# issuer-uri = ce que le token contient (URL publique de Keycloak, cote navigateur)
+# jwk-set-uri = comment CE service joint Keycloak (nom de conteneur en Docker)
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
+
+  # --- Notifications email ---
+  # L'autre partie est prevenue a chaque etape (demande, acceptation, refus, paiement, fin,
+  # annulation). L'envoi suit le commit et ne peut jamais faire echouer une transition.
+  notifications:
+    enabled: ${NOTIFICATIONS_ENABLED:true}
+    from: ${MAIL_FROM:BagBuddy <no-reply@bagbuddy.local>}
+    # Les liens ouvrent le detail de la transaction sur le front web.
+    front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
+
+# --- Appels service-a-service ---
+# transactionservice tarifie une reservation contre l'annonce reelle detenue par
+# tripservice. Le secret vient de l'environnement, jamais du depot.
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-service:
+      provider: keycloak
+      client-id: ${KEYCLOAK_SERVICE_CLIENT_ID:bagbuddy}
+      client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
+
+bagbuddy.service-client.registration-id: bagbuddy-service
+bagbuddy.trip-service.url: ${TRIP_SERVICE_URL:http://localhost:8082}
+# Remboursements et versements, executes par stripeservice (SettlementService).
+bagbuddy.stripe-service.url: ${STRIPE_SERVICE_URL:http://localhost:8085}
+
+# --- Reglement des transactions payees (SettlementPolicy) ---
+bagbuddy.payments:
+  platform-fee-percent: ${PLATFORM_FEE_PERCENT:10}
+  # L'acheteur qui annule moins de 24 h avant le depart n'est rembourse qu'a moitie : le voyageur a
+  # garde la place jusqu'au bout.
+  late-cancellation-window: ${LATE_CANCELLATION_WINDOW:PT24H}
+  late-cancellation-refund-percent: ${LATE_CANCELLATION_REFUND_PERCENT:50}
+
+# --- Machine a etats des transactions ---
+# Le vocabulaire doit rester aligne sur TRANSACTION_STATUS du front (repo bagbuddy-front).
+# Les transitions autorisees, elles, sont dans TransactionStateMachine.
+bagbuddy.transaction.status:
+  reservation-received: reservation_received
+  waiting-for-response-buyer: waiting_for_response
+  waiting-for-response-seller: waiting_for_response_seller
+  request-rejected: request_rejected
+  awaiting-payment: awaiting_payment
+  payment-required: payment_required
+  confirmed: confirmed
+  completed: completed
+  cancelled: cancelled
+
+management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+# --- Appels sortants ---
+# Delais courts et explicites : sans eux, un service muet fait patienter le
+# client jusqu'au timeout par defaut de la couche HTTP.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      tripservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un 404 ou un refus d'acces sont des reponses, pas des pannes : les
+        # compter ouvrirait le circuit parce que des clients demandent des
+        # choses qui n'existent pas.
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException
+      stripeservice:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+          - org.springframework.security.access.AccessDeniedException
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
+
+# En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
+spring.mail:
+  host: ${SMTP_HOST:localhost}
+  port: ${SMTP_PORT:1025}
+  username: ${SMTP_USERNAME:}
+  password: ${SMTP_PASSWORD:}
+  properties:
+    mail.smtp.auth: ${SMTP_AUTH:false}
+    mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+    mail.smtp.connectiontimeout: 5000
+    mail.smtp.timeout: 5000
+    mail.smtp.writetimeout: 5000

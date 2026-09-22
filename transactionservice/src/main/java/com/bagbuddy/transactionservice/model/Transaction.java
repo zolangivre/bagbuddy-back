@@ -2,14 +2,9 @@ package com.bagbuddy.transactionservice.model;
 
 import jakarta.persistence.*;
 import lombok.Data;
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.Map;
 
 @Data
 @Entity
@@ -63,6 +58,59 @@ public class Transaction {
 
     @Column(name = "paid_at")
     private LocalDateTime paidAt;
+
+    /** Ce que l'acheteur confie au voyageur, declare a la reservation. */
+    @Column(name = "content_description", length = 500)
+    private String contentDescription;
+
+    /** L'acheteur a accepte la liste des objets interdits en reservant. */
+    @Column(name = "prohibited_items_accepted", nullable = false)
+    private boolean prohibitedItemsAccepted;
+
+    /** Genere au paiement, montre a l'acheteur seul, saisi par le voyageur a la livraison. */
+    @Column(name = "handover_code", length = 6)
+    private String handoverCode;
+
+    @Column(name = "handover_attempts", nullable = false)
+    private int handoverAttempts;
+
+    /** Au-dela, le code est bloque : l'acheteur clot lui-meme, ou la moderation tranche. */
+    public static final int MAX_HANDOVER_ATTEMPTS = 5;
+
+    /** Trop de codes faux : le voyageur ne peut plus clore par ce chemin. */
+    public boolean isHandoverLocked() {
+        return handoverAttempts >= MAX_HANDOVER_ATTEMPTS;
+    }
+
+    // --- Reglement (SettlementService), en unites mineures comme stripeAmount ---
+    @Column(name = "platform_fee")
+    private Long platformFee;
+
+    @Column(name = "refund_amount")
+    private Long refundAmount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "refund_status", length = 32)
+    private SettlementStatus refundStatus;
+
+    @Column(name = "stripe_refund_id")
+    private String stripeRefundId;
+
+    @Column(name = "refunded_at")
+    private LocalDateTime refundedAt;
+
+    @Column(name = "payout_amount")
+    private Long payoutAmount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payout_status", length = 32)
+    private SettlementStatus payoutStatus;
+
+    @Column(name = "stripe_transfer_id")
+    private String stripeTransferId;
+
+    @Column(name = "paid_out_at")
+    private LocalDateTime paidOutAt;
 
     @Column(nullable = false, updatable = false, name = "transaction_created_at")
     private LocalDateTime createdAt;

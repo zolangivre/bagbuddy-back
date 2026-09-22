@@ -7,23 +7,58 @@ server:
 
 eureka:
   client:
+    # Serveur autonome : il ne s'enregistre pas aupres de lui-meme et ne va
+    # chercher aucun registre ailleurs. Ce n'est pas un oubli, c'est la config
+    # normale d'un Eureka standalone -- ne pas passer ces deux-la a true en
+    # croyant "activer" quelque chose.
     register-with-eureka: false
     fetch-registry: false
-    service-url:
-      defaultZone: https://eurekaserver-app-dd87242b5252.herokuapp.com/eureka/
+
+  instance:
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+
   server:
+    # Reglages taille dev : on veut voir un service apparaitre et disparaitre
+    # tout de suite apres un docker compose up/restart, pas au bout d'une minute
+    # et demie. En production, remettre l'auto-preservation et des intervalles
+    # plus larges -- ces valeurs generent beaucoup de trafic de controle.
     wait-time-in-ms-when-sync-empty: 0
     response-cache-update-interval-ms: 5000
     enable-self-preservation: false
     eviction-interval-timer-in-ms: 10000
-  instance:
-    hostname: eurekaserver-app-dd87242b5252.herokuapp.com
-    prefer-ip-address: false
-    non-secure-port: 80
-    non-secure-port-enabled: true
-    secure-port-enabled: false
+
+management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
 
 logging:
   level:
-    "[com.netflix.eureka]": OFF
-    "[com.netflix.discovery]": OFF
+    # Volontairement pas a OFF : c'est ici qu'on lit "Registered instance
+    # TRIP-SERVICE/..." quand on cherche pourquoi un service n'apparait pas.
+    "[com.netflix.eureka]": INFO
+    "[com.netflix.discovery]": WARN

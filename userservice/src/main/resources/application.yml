@@ -2,52 +2,211 @@ spring:
   application:
     name: user-service
 
+  # --- Threads virtuels (Java 21) ---
+  # Chaque requete passe l'essentiel de son temps a attendre : Postgres, un autre service,
+  # Keycloak, Stripe. Un thread virtuel ne retient pas de thread systeme pendant cette attente,
+  # ce qui compte sur deux coeurs ARM partages par huit JVM. Coupable par VIRTUAL_THREADS_ENABLED.
+  threads:
+    virtual:
+      enabled: ${VIRTUAL_THREADS_ENABLED:true}
+
+  # --- GraphQL ---
+  # Le point d'entree porte le prefixe du service : l'apigateway continue de router par prefixe
+  # de chemin (Path=/users/**) sans reecriture, et un appel direct au conteneur emprunte
+  # exactement la meme URL. Une seule route, un seul POST : c'est le contrat GraphQL.
+  graphql:
+    http:
+      path: /users/graphql
+    graphiql:
+      # Console de developpement, coupee par defaut. GRAPHIQL_ENABLED=true en local.
+      enabled: ${GRAPHIQL_ENABLED:false}
+      path: /users/graphiql
+
   datasource:
-    url: ${SPRING_DATASOURCE_URL}
-    username: ${SPRING_DATASOURCE_USERNAME}
-    password: ${SPRING_DATASOURCE_PASSWORD}
+    url: ${JDBC_DATABASE_URL:${DATABASE_URL}}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Un seul Postgres pour tous les services en prod (max_connections=100 par defaut) et
+      # Keycloak a cote : 10 connexions par service par defaut, c'etait deja la moitie du budget
+      # sans compter les redemarrages. Avec des threads virtuels, les requetes attendent une
+      # connexion libre au lieu de monopoliser un thread : 5 suffisent a ce volume.
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:5}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
+      # Plus court que les 30 s par defaut : une base saturee doit remonter vite en erreur.
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT:5000}
+
+  flyway:
+    # Les bases de dev existantes ont ete creees par Hibernate et n'ont pas
+    # d'historique Flyway : on les marque au niveau V1 (deja en place) au lieu
+    # d'echouer, et seules les migrations suivantes leur sont appliquees.
+    baseline-on-migrate: true
+    baseline-version: 1
 
   jpa:
     hibernate:
-      ddl-auto: update
+      # Le schema appartient a Flyway. 'validate' echoue au demarrage si les
+      # entites et les migrations ont diverge -- c'est le but : mieux vaut ne pas
+      # demarrer que decouvrir la divergence sur une requete en production.
+      ddl-auto: validate
     show-sql: false
+    # Une requete HTTP ne doit pas retenir une connexion DB pendant la serialisation GraphQL.
+    open-in-view: false
     properties:
       hibernate:
-        format_sql: true
         dialect: org.hibernate.dialect.PostgreSQLDialect
 
 server:
-  port: 8085
+  port: ${PORT:8086}
 
-# Configuration Keycloak
-#keycloak:
-#  auth-server-url: ${KEYCLOAK_AUTH_SERVER_URL}
-#  realm: ${KEYCLOAK_REALM}
-#  admin:
-#    username: ${KEYCLOAK_ADMIN_USERNAME}
-#    password: ${KEYCLOAK_ADMIN_PASSWORD}
-#    client-id: admin-cli
+# --- Authentification (Keycloak) ---
+bagbuddy:
+  auth:
+    # Liste blanche : meme realm, deux noms d'hote (navigateur / reseau Docker).
+    issuer-uris: ${JWT_ISSUER_URIS:http://localhost:8000/realms/bagbuddy,http://keycloak:8080/realms/bagbuddy}
+    jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/certs}
+    audience: ${JWT_AUDIENCE:bagbuddy-api}
 
-keycloak:
-  server-url: http://localhost:8000
-  realm: bagbuddy
-  admin-username: admin
-  admin-password: password
-  client-id: admin-cli
+  # --- API d'administration de Keycloak ---
+  # Le front sert ses propres ecrans d'inscription et de compte : creer un utilisateur,
+  # changer un email ou poser un mot de passe sont des operations d'administration, qu'un
+  # navigateur ne peut pas porter. Elles passent donc par ce service, avec le client de
+  # service `bagbuddy-accounts` — distinct de `bagbuddy` pour que le droit manage-users ne
+  # soit pas donne au client de tarification.
+  keycloak:
+    base-url: ${KEYCLOAK_BASE_URL:http://localhost:8000}
+    realm: ${KEYCLOAK_REALM:bagbuddy}
+    # Client public utilise pour verifier le mot de passe actuel (grant password) : la
+    # protection anti-force-brute du realm voit ainsi la tentative.
+    login-client-id: ${KEYCLOAK_LOGIN_CLIENT_ID:bagbuddy-web}
 
-# Eureka Client
-eureka:
-  client:
-    service-url:
-      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE}
-    register-with-eureka: true
-    fetch-registry: true
-  instance:
-    prefer-ip-address: true
-    instance-id: ${spring.application.name}:${random.value}
+  service-client:
+    registration-id: bagbuddy-accounts
+
+  # --- Emails de compte ---
+  # Les liens pointent vers le front web (/reset-password), jamais vers une page Keycloak.
+  front-url: ${BAGBUDDY_FRONT_URL:http://localhost:4200}
+  mail:
+    from: ${MAIL_FROM:BagBuddy <no-reply@bagbuddy.local>}
+  password-reset:
+    validity: ${PASSWORD_RESET_VALIDITY:30m}
+    # Au plus un email par compte sur cet intervalle : une rafale de demandes ne doit pas
+    # devenir une rafale d'emails dans la boite du titulaire.
+    min-interval: ${PASSWORD_RESET_MIN_INTERVAL:60s}
+  email-verification:
+    # Plus long que la reinitialisation : le lien ne donne aucun acces au compte.
+    validity: ${EMAIL_VERIFICATION_VALIDITY:24h}
+    min-interval: ${EMAIL_VERIFICATION_MIN_INTERVAL:60s}
+
+  # --- Favoris et signalements ---
+  favorites:
+    max: ${FAVORITES_MAX:200}
+  reports:
+    max-per-day: ${REPORTS_MAX_PER_DAY:10}
+  moderation:
+    # Boite de la moderation : chaque signalement y est envoye.
+    email: ${MODERATION_EMAIL:moderation@bagbuddy.local}
+
+# Les emails sont un effet secondaire, jamais une dependance : un SMTP injoignable ne doit pas
+# faire passer /actuator/health a DOWN, et le conteneur a unhealthy, pour autant.
+management.health.mail.enabled: false
+
+# En dev, Mailpit (docker-compose.dev.yml) recoit tout et l'affiche sur http://localhost:8025.
+spring.mail:
+  host: ${SMTP_HOST:localhost}
+  port: ${SMTP_PORT:1025}
+  username: ${SMTP_USERNAME:}
+  password: ${SMTP_PASSWORD:}
+  properties:
+    mail.smtp.auth: ${SMTP_AUTH:false}
+    mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+    mail.smtp.connectiontimeout: 5000
+    mail.smtp.timeout: 5000
+    mail.smtp.writetimeout: 5000
+
+spring.security.oauth2.client:
+  registration:
+    bagbuddy-accounts:
+      provider: keycloak
+      client-id: ${KEYCLOAK_ACCOUNTS_CLIENT_ID:bagbuddy-accounts}
+      client-secret: ${KEYCLOAK_ACCOUNTS_CLIENT_SECRET}
+      authorization-grant-type: client_credentials
+  provider:
+    keycloak:
+      token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8000/realms/bagbuddy/protocol/openid-connect/token}
 
 logging:
   level:
     com.bagbuddy.userservice: INFO
-    org.keycloak: WARN
+
+# --- Service discovery (Eureka) ---
+# Le service s'enregistre sous son spring.application.name : c'est ce nom que
+# l'apigateway resout (lb://user-service). Le port annonce est deduit de
+# server.port, il n'y a donc rien a coder en dur ici.
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka/}
+    # Cadence dev : un service redemarre doit redevenir routable en quelques
+    # secondes, pas au bout d'une minute et demie.
+    registry-fetch-interval-seconds: 5
+  instance:
+    # En Docker, le nom d'hote d'un conteneur n'est resolvable que depuis le
+    # reseau compose ; son IP l'est toujours.
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15
+
+management:
+  metrics:
+    tags:
+      # Chaque serie porte le nom du service : un seul Prometheus les scrute toutes.
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      # Dev : on trace tout. En production ce taux se baisse, le cout d'un span
+      # n'est pas nul.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        # prometheus : metriques JVM, HTTP, pool de connexions, circuit breakers. Ouvert sans
+        # jeton pour le scrape, donc jamais publie : en prod ni ce port ni /actuator ne sortent
+        # de la machine (Caddy renvoie 404 sur /actuator hors health).
+        include: ${ACTUATOR_EXPOSURE:health,prometheus}
+  endpoint:
+    health:
+      # Anonyme : uniquement UP/DOWN, ce dont la sonde Docker a besoin.
+      # Authentifie : le detail (base, disque, registre). L'endpoint est ouvert
+      # dans SecurityConfig, il ne doit donc pas raconter l'infra a un inconnu.
+      show-details: when-authorized
+      probes:
+        enabled: true
+
+# --- Appels sortants ---
+# Keycloak est sur le chemin de 'register', la seule operation anonyme du systeme :
+# sans delais explicites, un Keycloak muet retient les threads de requete sur ce
+# chemin precis, celui qu'un appelant non authentifie peut atteindre.
+spring.http.client:
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      keycloak:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un identifiant deja pris ou un mot de passe faux sont des reponses,
+        # pas des pannes : les compter ouvrirait le circuit sans raison.
+        ignore-exceptions:
+          - com.bagbuddy.userservice.web.AccountException
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException

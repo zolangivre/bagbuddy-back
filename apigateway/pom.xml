@@ -16,10 +16,10 @@
     <artifactId>apigateway</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>api-gateway</name>
-    <description>Reactive API Gateway for WoofWoof microservices</description>
+    <description>Reactive API Gateway for BagBuddy microservices</description>
 
     <properties>
-        <java.version>17</java.version>
+        <java.version>21</java.version>
         <spring-cloud.version>2025.0.0</spring-cloud.version>
     </properties>
 
@@ -28,6 +28,18 @@
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-gateway</artifactId>
+        </dependency>
+        <!-- Redis : magasin des compteurs de RequestRateLimiter. Le gateway en
+             depend des lors qu'une route est limitee. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
+        <!-- Client Eureka : le service s'enregistre au demarrage et l'apigateway
+             le resout ensuite par son spring.application.name. -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
         </dependency>
 
         <!-- 🔧 Monitoring & santé -->
@@ -48,6 +60,20 @@
                 </exclusion>
             </exclusions>
         </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.zipkin.reporter2</groupId>
+            <artifactId>zipkin-reporter-brave</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Metriques au format Prometheus sur /actuator/prometheus. -->
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
     </dependencies>
 
     <dependencyManagement>
@@ -59,6 +85,8 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Tracing distribue : un identifiant de trace commun traverse le gateway et
+                 les services, et se retrouve dans chaque ligne de log. -->
         </dependencies>
     </dependencyManagement>
 

@@ -1,0 +1,192 @@
+# Annonces de voyage. Toute lecture exige un jeton Keycloak valide (SecurityConfig) ;
+# la propriete d'une annonce est verifiee dans TripService, pas ici.
+
+scalar DateTime
+scalar BigDecimal
+
+type Query {
+    "Toutes les annonces, les plus recentes d'abord."
+    trips(limit: Int, offset: Int): [Trip!]!
+
+    "Annonces encore reservables : capacite restante > 0 et depart dans le futur."
+    activeTrips(limit: Int, offset: Int): [Trip!]!
+
+    inactiveTrips(limit: Int, offset: Int): [Trip!]!
+
+    """
+    Annonces encore reservables, filtrees et triees cote serveur, avec le nombre total de resultats
+    et les agregats du filtre entier. limit/offset optionnels, 200 elements au plus par page.
+    """
+    searchTrips(filter: TripSearchInput, limit: Int, offset: Int): TripSearchResult!
+
+    trip(id: ID!): Trip!
+
+    "Annonces par identifiant, dans l'ordre demande ; les ids inconnus sont ignores. 200 ids au plus."
+    tripsByIds(ids: [ID!]!): [Trip!]!
+
+    "Alertes de trajet de l'appelant, les plus recentes d'abord."
+    myTripAlerts: [TripAlert!]!
+
+    "Les plus recentes d'abord. limit/offset optionnels, 200 elements au plus par page."
+    tripsByUser(userId: String!, limit: Int, offset: Int): [Trip!]!
+
+    """
+    Compte de paiement du voyageur. Lisible uniquement par son proprietaire : le parcours de
+    paiement n'en a plus besoin cote client, stripeservice le resout lui-meme.
+    """
+    payoutAccount(userId: String!): String
+}
+
+type Mutation {
+    createTrip(input: TripInput!): Trip!
+    updateTrip(id: ID!, input: TripInput!): Trip!
+
+    "Vrai si l'annonce a bien ete supprimee. Reserve au proprietaire."
+    deleteTrip(id: ID!): Boolean!
+
+    """
+    Cree une alerte : un email a chaque annonce publiee qui correspond. L'email est celui du
+    jeton. Codes : alert_needs_email, alert_invalid_route, alert_invalid_date,
+    alert_invalid_flex, too_many_alerts (10 par membre).
+    """
+    createTripAlert(input: TripAlertInput!): TripAlert!
+
+    "Vrai si l'alerte existait et appartenait a l'appelant."
+    deleteTripAlert(id: ID!): Boolean!
+}
+
+type Trip {
+    id: ID!
+    userId: String
+    userInfo: UserInfoView
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: DateTime
+    arrivalDate: DateTime
+    totalWeightAvailable: BigDecimal
+
+    "Decremente par le service lors d'une reservation, jamais par le client."
+    remainingWeight: BigDecimal
+    pricePerKg: BigDecimal
+
+    "Calcule par TripListener a partir de remainingWeight et departureDate."
+    active: Boolean
+    conditions: String
+    createdAt: DateTime
+
+    "Renseigne uniquement pour le proprietaire de l'annonce."
+    stripeAccountId: String
+}
+
+"""
+Instantane du voyageur tel qu'il est expose. username, email et phone ne sont renseignes que
+pour le proprietaire de l'annonce : les listes sont lisibles par tout membre authentifie et ne
+doivent pas distribuer le carnet d'adresses (le username est l'email choisi a l'inscription).
+"""
+type UserInfoView {
+    sub: String
+    name: String
+    givenName: String
+    familyName: String
+    username: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+    email: String
+    phone: String
+}
+
+"Les tris de la liste d'annonces. id departage les egalites, pour une pagination stable."
+type TripAlert {
+    id: ID!
+    departureAirport: String!
+    arrivalAirport: String!
+    "YYYY-MM-DD, ou nul : toutes les dates."
+    date: String
+    flexDays: Int!
+    maxPricePerKg: BigDecimal
+    minWeight: BigDecimal
+    createdAt: DateTime!
+}
+
+input TripAlertInput {
+    departureAirport: String!
+    arrivalAirport: String!
+    "YYYY-MM-DD, facultatif."
+    date: String
+    "0 a 30, ignore sans date."
+    flexDays: Int
+    maxPricePerKg: BigDecimal
+    minWeight: BigDecimal
+    "Langue de l'email : en ou fr."
+    language: String
+}
+
+enum TripSort {
+    RECENT
+    EARLIEST_DEPARTURE
+    PRICE_LOW
+    PRICE_HIGH
+    WEIGHT_HIGH
+    WEIGHT_LOW
+}
+
+"Tous les champs sont optionnels ; un champ absent ne filtre pas."
+input TripSearchInput {
+    "Code IATA, insensible a la casse."
+    departureAirport: String
+    arrivalAirport: String
+
+    "Jour de depart cherche, YYYY-MM-DD, en heure locale de l'aeroport."
+    date: String
+
+    "Tolerance autour de date, en jours (0 a 30). Ignoree sans date."
+    flexDays: Int
+    minPricePerKg: BigDecimal
+    maxPricePerKg: BigDecimal
+
+    "Bornes sur le poids encore disponible."
+    minWeight: BigDecimal
+    maxWeight: BigDecimal
+
+    "RECENT par defaut."
+    sort: TripSort
+}
+
+type TripSearchResult {
+    items: [Trip!]!
+
+    "Nombre d'annonces correspondant au filtre, toutes pages confondues."
+    totalCount: Int!
+
+    "Poids disponible cumule sur tout le filtre."
+    totalRemainingWeight: BigDecimal!
+
+    "Prix moyen au kilo sur tout le filtre. Null sans resultat."
+    averagePricePerKg: BigDecimal
+}
+
+input TripInput {
+    departureAirport: String
+    arrivalAirport: String
+    departureDate: DateTime
+    arrivalDate: DateTime
+    totalWeightAvailable: BigDecimal
+    pricePerKg: BigDecimal
+    conditions: String
+
+    "Omis ou null a la modification : le compte deja enregistre sur l'annonce est conserve."
+    stripeAccountId: String
+
+    """
+    Champs libres du profil recopies dans l'instantane. L'identite (sub, email, nom) vient du
+    jeton et n'est volontairement pas acceptee ici.
+    """
+    profile: ProfileInput
+}
+
+input ProfileInput {
+    bio: String
+    location: String
+    phone: String
+}

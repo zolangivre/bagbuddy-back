@@ -1,0 +1,170 @@
+# Profils applicatifs : ce que Keycloak ne porte pas (bio, localisation, telephone, compte de
+# paiement). L'identite elle-meme reste a Keycloak, editee via updateIdentity / changePassword.
+#
+# Attention en lisant SecurityConfig : /users/graphql est le seul point d'entree GraphQL du
+# projet ouvert sans jeton, parce que l'inscription est une operation de ce meme schema.
+# L'authentification est donc portee resolver par resolver (@PreAuthorize), pas par l'URL.
+
+type Query {
+    "Profil de l'appelant, cree a la volee a la premiere visite depuis les claims du jeton."
+    me: UserProfile!
+
+    "Profil public d'un autre membre : ni email, ni telephone, ni compte de paiement."
+    user(sub: String!): PublicUserProfile!
+
+    "Annonces mises de cote par l'appelant, les plus recentes d'abord. Lues ensuite dans tripservice (tripsByIds)."
+    favoriteListingIds: [ID!]!
+}
+
+type Mutation {
+    """
+    Inscription. Seule operation du schema accessible sans jeton : le compte qu'elle cree est
+    precisement celui dont l'appelant n'a pas encore de jeton. Le compte est cree dans
+    Keycloak ; le profil applicatif, lui, apparait a la premiere requete me.
+    """
+    register(input: RegisterInput!): Boolean!
+
+    "Champs libres du profil. L'identite n'est pas modifiable ici, par construction."
+    updateProfile(input: UpdateProfileInput!): UserProfile!
+
+    """
+    Nom et email, portes par Keycloak. Un changement d'email exige le mot de passe actuel et
+    repasse par une verification.
+    """
+    updateIdentity(input: UpdateIdentityInput!): UserProfile!
+
+    "Le mot de passe actuel est exige : une session ouverte ne suffit pas a en changer."
+    changePassword(input: ChangePasswordInput!): Boolean!
+
+    """
+    Mot de passe oublie, sans jeton. Envoie un lien vers le front si l'email correspond a un
+    compte actif, et repond true dans tous les cas : la reponse ne dit pas qui est inscrit.
+    """
+    requestPasswordReset(input: RequestPasswordResetInput!): Boolean!
+
+    """
+    Pose un nouveau mot de passe a partir du jeton du lien, sans jeton d'acces. Le lien ne sert
+    qu'une fois, et toutes les sessions ouvertes du compte sont fermees. Lien inconnu, expire,
+    deja utilise, ou envoye a une adresse que le compte n'a plus : code invalid_reset_token.
+    """
+    resetPassword(input: ResetPasswordInput!): Boolean!
+
+    """
+    Envoie un lien de verification a l'adresse actuelle du compte de l'appelant (en ou fr).
+    false si elle est deja verifiee. Au plus un email par minute : code
+    verification_email_throttled au-dela.
+    """
+    sendVerificationEmail(language: String): Boolean!
+
+    """
+    Marque l'adresse verifiee a partir du jeton du lien, sans jeton d'acces : le lien s'ouvre
+    souvent sur un autre appareil. Lien inconnu, expire, deja utilise, ou envoye a une adresse
+    que le compte n'a plus : code invalid_verification_token.
+    """
+    verifyEmail(token: String!): Boolean!
+
+    "Idempotent. 200 favoris au plus : code too_many_favorites au-dela."
+    addFavoriteListing(listingId: ID!): Boolean!
+
+    "Idempotent : retirer une annonce absente n'est pas une erreur."
+    removeFavoriteListing(listingId: ID!): Boolean!
+
+    """
+    Signale un membre a la moderation (email). L'auteur est toujours l'appelant. Codes :
+    cannot_report_self, too_many_reports (10 par 24 h).
+    """
+    reportMember(input: ReportMemberInput!): Boolean!
+}
+
+enum ReportReason {
+    "Objets interdits ou contenu non declare."
+    PROHIBITED_ITEMS
+    "Absent au rendez-vous de remise."
+    NO_SHOW
+    FRAUD
+    HARASSMENT
+    OTHER
+}
+
+input ReportMemberInput {
+    reportedSub: String!
+    "La transaction concernee, quand le signalement vient d'une transaction."
+    transactionId: ID
+    reason: ReportReason!
+    "2000 caracteres au plus."
+    details: String
+}
+
+"Profil complet. N'est jamais renvoye qu'a son proprietaire."
+type UserProfile {
+    sub: String
+    email: String
+    emailVerified: Boolean!
+    username: String
+    name: String
+    givenName: String
+    familyName: String
+    bio: String
+    location: String
+    phone: String
+    "Compte Stripe Connect du membre, enregistre par stripeservice. Lecture seule."
+    stripeAccountId: String
+}
+
+"Ce que tout membre authentifie peut voir d'un autre."
+type PublicUserProfile {
+    sub: String
+    "Nul sauf pour l'appelant lui-meme : le nom d'utilisateur est l'adresse email."
+    username: String
+    name: String
+    givenName: String
+    emailVerified: Boolean!
+    bio: String
+    location: String
+}
+
+input RegisterInput {
+    firstName: String!
+    lastName: String!
+
+    "Sert aussi de nom d'utilisateur : il n'y a pas de champ username."
+    email: String!
+    password: String!
+}
+
+"""
+Le compte de versement n'y figure pas : il est cree et enregistre par stripeservice pendant
+l'onboarding Stripe Connect (startPayoutOnboarding), jamais saisi par le membre.
+"""
+input UpdateProfileInput {
+    bio: String
+    location: String
+    phone: String
+}
+
+input UpdateIdentityInput {
+    firstName: String!
+    lastName: String!
+    email: String!
+
+    "Exige seulement si l'email change : l'email est aussi l'identifiant de connexion."
+    currentPassword: String
+}
+
+input ChangePasswordInput {
+    currentPassword: String!
+    newPassword: String!
+}
+
+input RequestPasswordResetInput {
+    email: String!
+
+    "Langue de l'email : en ou fr, celle du visiteur sur le front. Anglais par defaut."
+    language: String
+}
+
+input ResetPasswordInput {
+    "Le jeton porte par le lien de l'email."
+    token: String!
+    newPassword: String!
+}

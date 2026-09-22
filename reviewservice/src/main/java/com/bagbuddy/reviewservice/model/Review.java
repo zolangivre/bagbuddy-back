@@ -1,11 +1,15 @@
 package com.bagbuddy.reviewservice.model;
 
 import jakarta.persistence.*;
+import lombok.Data;
 
 import java.time.LocalDateTime;
 
+@Data
 @Entity
-@Table(name = "review")
+// La contrainte est posee par Flyway (V4) ; la declarer ici la donne aussi au schema H2 des tests.
+@Table(name = "review", uniqueConstraints = @UniqueConstraint(
+        name = "uk_review_reviewer_transaction", columnNames = {"reviewer_id", "transaction_id"}))
 public class Review {
 
     @Id
@@ -32,78 +36,5 @@ public class Review {
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
-    }
-
-    // Getters / Setters
-    public Long getId() {
-        return id;
-    }
-
-    public void setId(Long id) {
-        this.id = id;
-    }
-
-    public String getReviewerId() {
-        return reviewerId;
-    }
-
-    public void setReviewerId(String reviewerId) {
-        this.reviewerId = reviewerId;
-    }
-
-    public String getRevieweeId() {
-        return revieweeId;
-    }
-
-    public void setRevieweeId(String revieweeId) {
-        this.revieweeId = revieweeId;
-    }
-
-    public Long getTransactionId() {
-        return transactionId;
-    }
-
-    public void setTransactionId(Long transactionId) {
-        this.transactionId = transactionId;
-    }
-
-    public Integer getRating() {
-        return rating;
-    }
-
-    public void setRating(Integer rating) {
-        this.rating = rating;
-    }
-
-    public String getComment() {
-        return comment;
-    }
-
-    public void setComment(String comment) {
-        this.comment = comment;
-    }
-
-    public LocalDateTime getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(LocalDateTime createdAt) {
-        this.createdAt = createdAt;
-    }
-
-    public String getReviewerName() {
-        return reviewerName;
-    }
-
-    public void setReviewerName(String reviewerName) {
-        this.reviewerName = reviewerName;
-    }
-
-    public String getRevieweeName() {
-        return revieweeName;
-    }
-
-    public void setRevieweeName(String revieweeName) {
-        this.revieweeName = revieweeName;
     }
 }
